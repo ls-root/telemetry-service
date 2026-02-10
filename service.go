@@ -82,13 +82,7 @@ type TelemetryIn struct {
 	Error    string `json:"error,omitempty"`     // Error description (max 120 chars)
 	ExitCode int    `json:"exit_code,omitempty"` // 0-255
 
-	// === NEW FIELDS ===
-
-	// Tool telemetry (type="tool")
-	ToolName string `json:"tool_name,omitempty"` // "microcode", "lxc-update", "post-pve-install", etc.
-
-	// Addon telemetry (type="addon")
-	ParentCT string `json:"parent_ct,omitempty"` // Parent container name (e.g., "jellyfin")
+	// === EXTENDED FIELDS ===
 
 	// GPU Passthrough stats
 	GPUVendor       string `json:"gpu_vendor,omitempty"`       // "intel", "amd", "nvidia"
@@ -119,8 +113,6 @@ type TelemetryOut struct {
 	ExitCode  int    `json:"exit_code,omitempty"`
 
 	// Extended fields
-	ToolName        string `json:"tool_name,omitempty"`
-	ParentCT        string `json:"parent_ct,omitempty"`
 	GPUVendor       string `json:"gpu_vendor,omitempty"`
 	GPUPassthrough  string `json:"gpu_passthrough,omitempty"`
 	InstallDuration int    `json:"install_duration,omitempty"`
@@ -575,9 +567,7 @@ func validate(in *TelemetryIn) error {
 	in.PveVer = sanitizeShort(in.PveVer, 32)
 	in.Method = sanitizeShort(in.Method, 32)
 
-	// Sanitize new fields
-	in.ToolName = sanitizeShort(in.ToolName, 64)
-	in.ParentCT = sanitizeShort(in.ParentCT, 64)
+	// Sanitize extended fields
 	in.GPUVendor = strings.ToLower(sanitizeShort(in.GPUVendor, 16))
 	in.GPUPassthrough = strings.ToLower(sanitizeShort(in.GPUPassthrough, 16))
 	in.ErrorCategory = strings.ToLower(sanitizeShort(in.ErrorCategory, 32))
@@ -983,8 +973,6 @@ func main() {
 			Method:          in.Method,
 			Error:           in.Error,
 			ExitCode:        in.ExitCode,
-			ToolName:        in.ToolName,
-			ParentCT:        in.ParentCT,
 			GPUVendor:       in.GPUVendor,
 			GPUPassthrough:  in.GPUPassthrough,
 			InstallDuration: in.InstallDuration,

@@ -99,9 +99,8 @@ type ToolCount struct {
 }
 
 type AddonCount struct {
-	Addon    string `json:"addon"`
-	ParentCT string `json:"parent_ct"`
-	Count    int    `json:"count"`
+	Addon string `json:"addon"`
+	Count int    `json:"count"`
 }
 
 // FetchDashboardData retrieves aggregated data from PocketBase
@@ -193,9 +192,9 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*Dashboard
 
 		// === Extended metrics tracking ===
 
-		// Track tool executions
-		if r.Type == "tool" && r.ToolName != "" {
-			toolCounts[r.ToolName]++
+		// Track tool executions (type="tool", tool name is in nsapp)
+		if r.Type == "tool" && r.NSAPP != "" {
+			toolCounts[r.NSAPP]++
 			data.TotalTools++
 		}
 
