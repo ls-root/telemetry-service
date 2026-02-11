@@ -61,6 +61,11 @@ type Config struct {
 	WeeklyReportEnabled bool
 	WeeklyReportDay     int // 0=Sunday, 1=Monday, etc.
 	WeeklyReportHour    int // 0-23
+
+	// Cleanup Job
+	CleanupEnabled         bool
+	CleanupIntervalHours   int
+	CleanupStuckAfterHours int
 }
 
 // TelemetryIn matches payload from api.func (bash client)
@@ -758,6 +763,11 @@ func main() {
 		WeeklyReportEnabled: envBool("WEEKLY_REPORT_ENABLED", false),
 		WeeklyReportDay:     envInt("WEEKLY_REPORT_DAY", 1),  // Monday
 		WeeklyReportHour:    envInt("WEEKLY_REPORT_HOUR", 8), // 08:00
+
+		// Cleanup config
+		CleanupEnabled:         envBool("CLEANUP_ENABLED", true),
+		CleanupIntervalHours:   envInt("CLEANUP_INTERVAL_HOURS", 6),   // Run every 6 hours
+		CleanupStuckAfterHours: envInt("CLEANUP_STUCK_AFTER_HOURS", 48), // 2 days
 	}
 
 	var pt *ProxyTrust
@@ -798,6 +808,14 @@ func main() {
 		WeeklyReportHour:    cfg.WeeklyReportHour,
 	}, pb)
 	alerter.Start()
+
+	// Initialize cleaner for stuck installations
+	cleaner := NewCleaner(CleanupConfig{
+		Enabled:         cfg.CleanupEnabled,
+		CheckInterval:   time.Duration(cfg.CleanupIntervalHours) * time.Hour,
+		StuckAfterHours: cfg.CleanupStuckAfterHours,
+	}, pb)
+	cleaner.Start()
 
 	mux := http.NewServeMux()
 
