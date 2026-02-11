@@ -309,7 +309,7 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 }
 
 // FetchRecordsPaginated retrieves records with pagination and optional filters.
-func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, sortField, repoSource string) ([]TelemetryRecord, int, error) {
+func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, 0, err
 	}
@@ -324,6 +324,9 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	}
 	if osType != "" {
 		filters = append(filters, fmt.Sprintf("os_type='%s'", osType))
+	}
+	if typeFilter != "" {
+		filters = append(filters, fmt.Sprintf("type='%s'", typeFilter))
 	}
 	if repoSource != "" {
 		filters = append(filters, fmt.Sprintf("repo_source='%s'", repoSource))
@@ -939,6 +942,7 @@ func main() {
 		status := r.URL.Query().Get("status")
 		app := r.URL.Query().Get("app")
 		osType := r.URL.Query().Get("os")
+		typeFilter := r.URL.Query().Get("type")
 		sort := r.URL.Query().Get("sort")
 		repoSource := r.URL.Query().Get("repo")
 		if repoSource == "" {
@@ -964,7 +968,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, sort, repoSource)
+		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
