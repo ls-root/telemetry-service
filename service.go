@@ -886,11 +886,9 @@ func main() {
 		days := 30
 		if d := r.URL.Query().Get("days"); d != "" {
 			fmt.Sscanf(d, "%d", &days)
-			if days < 1 {
-				days = 1
-			}
-			if days > 365 {
-				days = 365
+			// days=0 means "all entries", negative values are invalid
+			if days < 0 {
+				days = 30
 			}
 		}
 
