@@ -206,13 +206,21 @@ This is an automated alert from the telemetry service.
 }
 
 func (a *Alerter) sendEmail(subject, body string) error {
+	return a.sendEmailWithType(subject, body, "text/plain")
+}
+
+func (a *Alerter) sendHTMLEmail(subject, body string) error {
+	return a.sendEmailWithType(subject, body, "text/html")
+}
+
+func (a *Alerter) sendEmailWithType(subject, body, contentType string) error {
 	// Build message
 	var msg bytes.Buffer
 	msg.WriteString(fmt.Sprintf("From: %s\r\n", a.cfg.SMTPFrom))
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(a.cfg.SMTPTo, ", ")))
 	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
 	msg.WriteString("MIME-Version: 1.0\r\n")
-	msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	msg.WriteString(fmt.Sprintf("Content-Type: %s; charset=UTF-8\r\n", contentType))
 	msg.WriteString("\r\n")
 	msg.WriteString(body)
 
@@ -362,10 +370,10 @@ func (a *Alerter) SendWeeklyReport() error {
 	}
 
 	// Generate email content
-	subject := fmt.Sprintf("[ProxmoxVED] Wochenbericht KW %d/%d", reportData.CalendarWeek, reportData.Year)
-	body := a.generateWeeklyReportEmail(reportData)
+	subject := fmt.Sprintf("[ProxmoxVED] Weekly Report - Week %d, %d", reportData.CalendarWeek, reportData.Year)
+	body := a.generateWeeklyReportHTML(reportData)
 
-	if err := a.sendEmail(subject, body); err != nil {
+	if err := a.sendHTMLEmail(subject, body); err != nil {
 		return fmt.Errorf("failed to send email: %w", err)
 	}
 
@@ -490,91 +498,236 @@ func (a *Alerter) fetchWeeklyReportData(ctx context.Context) (*WeeklyReportData,
 	return report, nil
 }
 
-// generateWeeklyReportEmail creates the email body for the weekly report
-func (a *Alerter) generateWeeklyReportEmail(data *WeeklyReportData) string {
+// generateWeeklyReportHTML creates the HTML email body for the weekly report
+func (a *Alerter) generateWeeklyReportHTML(data *WeeklyReportData) string {
 	var b strings.Builder
 
-	b.WriteString("ProxmoxVE Helper Scripts - Wöchentlicher Telemetrie-Bericht\n")
-	b.WriteString("═══════════════════════════════════════════════════════════\n\n")
+	// HTML Email Template
+	b.WriteString(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#f6f9fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f6f9fc;padding:40px 20px;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:12px;box-shadow:0 4px 6px rgba(0,0,0,0.07);">
 
-	b.WriteString(fmt.Sprintf("📅 Kalenderwoche: KW %d/%d\n", data.CalendarWeek, data.Year))
-	b.WriteString(fmt.Sprintf("   Zeitraum: %s - %s\n\n",
-		data.StartDate.Format("02.01.2006"),
-		data.EndDate.Format("02.01.2006")))
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:32px 40px;border-radius:12px 12px 0 0;">
+<h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:600;">📊 Weekly Telemetry Report</h1>
+<p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">ProxmoxVE Helper Scripts</p>
+</td>
+</tr>
 
-	b.WriteString("────────────────────────────────────────────────────────────\n")
-	b.WriteString("📊 ÜBERSICHT\n")
-	b.WriteString("────────────────────────────────────────────────────────────\n\n")
+<!-- Week Info -->
+<tr>
+<td style="padding:24px 40px 0;">
+<table width="100%" style="background:#f8fafc;border-radius:8px;padding:16px;">
+<tr>
+<td style="padding:12px 16px;">
+<span style="color:#64748b;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">Calendar Week</span><br>
+<span style="color:#1e293b;font-size:20px;font-weight:600;">Week `)
+	b.WriteString(fmt.Sprintf("%d, %d", data.CalendarWeek, data.Year))
+	b.WriteString(`</span>
+</td>
+<td style="padding:12px 16px;text-align:right;">
+<span style="color:#64748b;font-size:12px;text-transform:uppercase;letter-spacing:0.5px;">Period</span><br>
+<span style="color:#1e293b;font-size:14px;">`)
+	b.WriteString(fmt.Sprintf("%s – %s", data.StartDate.Format("Jan 02"), data.EndDate.Format("Jan 02, 2006")))
+	b.WriteString(`</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
 
-	b.WriteString(fmt.Sprintf("  Installationen gesamt:  %d\n", data.TotalInstalls))
-	b.WriteString(fmt.Sprintf("  ✅ Erfolgreich:         %d\n", data.SuccessCount))
-	b.WriteString(fmt.Sprintf("  ❌ Fehlgeschlagen:      %d\n", data.FailedCount))
-	b.WriteString(fmt.Sprintf("  📈 Erfolgsrate:         %.1f%%\n\n", data.SuccessRate))
+<!-- Stats Grid -->
+<tr>
+<td style="padding:24px 40px;">
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td width="25%" style="padding:8px;">
+<div style="background:#f0fdf4;border-radius:8px;padding:16px;text-align:center;">
+<div style="color:#16a34a;font-size:28px;font-weight:700;">`)
+	b.WriteString(fmt.Sprintf("%d", data.TotalInstalls))
+	b.WriteString(`</div>
+<div style="color:#166534;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Total</div>
+</div>
+</td>
+<td width="25%" style="padding:8px;">
+<div style="background:#f0fdf4;border-radius:8px;padding:16px;text-align:center;">
+<div style="color:#16a34a;font-size:28px;font-weight:700;">`)
+	b.WriteString(fmt.Sprintf("%d", data.SuccessCount))
+	b.WriteString(`</div>
+<div style="color:#166534;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Successful</div>
+</div>
+</td>
+<td width="25%" style="padding:8px;">
+<div style="background:#fef2f2;border-radius:8px;padding:16px;text-align:center;">
+<div style="color:#dc2626;font-size:28px;font-weight:700;">`)
+	b.WriteString(fmt.Sprintf("%d", data.FailedCount))
+	b.WriteString(`</div>
+<div style="color:#991b1b;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Failed</div>
+</div>
+</td>
+<td width="25%" style="padding:8px;">
+<div style="background:#eff6ff;border-radius:8px;padding:16px;text-align:center;">
+<div style="color:#2563eb;font-size:28px;font-weight:700;">`)
+	b.WriteString(fmt.Sprintf("%.1f%%", data.SuccessRate))
+	b.WriteString(`</div>
+<div style="color:#1e40af;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px;">Success Rate</div>
+</div>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+`)
 
-	// Comparison to previous week
+	// Week comparison
 	if data.ComparedToPrev.InstallsChange != 0 || data.ComparedToPrev.FailRateChange != 0 {
-		b.WriteString("  Vergleich zur Vorwoche:\n")
-		changeSymbol := "📈"
+		installIcon := "📈"
+		installColor := "#16a34a"
 		if data.ComparedToPrev.InstallsChange < 0 {
-			changeSymbol = "📉"
+			installIcon = "📉"
+			installColor = "#dc2626"
 		}
-		b.WriteString(fmt.Sprintf("    %s Installationen: %+d (%.1f%%)\n",
-			changeSymbol, data.ComparedToPrev.InstallsChange, data.ComparedToPrev.InstallsPercent))
-		
-		failChangeSymbol := "✅"
+		failIcon := "✅"
+		failColor := "#16a34a"
 		if data.ComparedToPrev.FailRateChange > 0 {
-			failChangeSymbol = "⚠️"
+			failIcon = "⚠️"
+			failColor = "#dc2626"
 		}
-		b.WriteString(fmt.Sprintf("    %s Fehlerrate:     %+.1f Prozentpunkte\n\n",
-			failChangeSymbol, data.ComparedToPrev.FailRateChange))
+
+		b.WriteString(`<tr>
+<td style="padding:0 40px 24px;">
+<table width="100%" style="background:#fafafa;border-radius:8px;">
+<tr>
+<td style="padding:16px;border-right:1px solid #e5e7eb;">
+<span style="font-size:12px;color:#64748b;">vs. Previous Week</span><br>
+<span style="font-size:16px;color:`)
+		b.WriteString(installColor)
+		b.WriteString(`;">`)
+		b.WriteString(installIcon)
+		b.WriteString(fmt.Sprintf(" %+d installations (%.1f%%)", data.ComparedToPrev.InstallsChange, data.ComparedToPrev.InstallsPercent))
+		b.WriteString(`</span>
+</td>
+<td style="padding:16px;">
+<span style="font-size:12px;color:#64748b;">Failure Rate Change</span><br>
+<span style="font-size:16px;color:`)
+		b.WriteString(failColor)
+		b.WriteString(`;">`)
+		b.WriteString(failIcon)
+		b.WriteString(fmt.Sprintf(" %+.1f percentage points", data.ComparedToPrev.FailRateChange))
+		b.WriteString(`</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+`)
 	}
 
-	b.WriteString("────────────────────────────────────────────────────────────\n")
-	b.WriteString("🏆 TOP 5 INSTALLIERTE SCRIPTS\n")
-	b.WriteString("────────────────────────────────────────────────────────────\n\n")
-
+	// Top 5 Installed Scripts
+	b.WriteString(`<tr>
+<td style="padding:0 40px 24px;">
+<h2 style="margin:0 0 16px;font-size:16px;color:#1e293b;border-bottom:2px solid #e2e8f0;padding-bottom:8px;">🏆 Top 5 Installed Scripts</h2>
+<table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+`)
 	if len(data.TopApps) > 0 {
 		for i, app := range data.TopApps {
-			b.WriteString(fmt.Sprintf("  %d. %-25s %5d Installationen\n", i+1, app.Name, app.Total))
+			bgColor := "#ffffff"
+			if i%2 == 0 {
+				bgColor = "#f8fafc"
+			}
+			b.WriteString(fmt.Sprintf(`<tr style="background:%s;">
+<td style="padding:12px 16px;border-radius:4px 0 0 4px;">
+<span style="background:#e0e7ff;color:#4338ca;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;">%d</span>
+<span style="margin-left:12px;font-weight:500;color:#1e293b;">%s</span>
+</td>
+<td style="padding:12px 16px;text-align:right;border-radius:0 4px 4px 0;color:#64748b;">%d installs</td>
+</tr>`, bgColor, i+1, app.Name, app.Total))
 		}
 	} else {
-		b.WriteString("  Keine Daten verfügbar\n")
+		b.WriteString(`<tr><td style="padding:12px 16px;color:#64748b;">No data available</td></tr>`)
 	}
-	b.WriteString("\n")
+	b.WriteString(`</table>
+</td>
+</tr>
+`)
 
-	b.WriteString("────────────────────────────────────────────────────────────\n")
-	b.WriteString("⚠️  TOP 5 FEHLERHAFTE SCRIPTS\n")
-	b.WriteString("────────────────────────────────────────────────────────────\n\n")
-
+	// Top 5 Failed Scripts
+	b.WriteString(`<tr>
+<td style="padding:0 40px 24px;">
+<h2 style="margin:0 0 16px;font-size:16px;color:#1e293b;border-bottom:2px solid #e2e8f0;padding-bottom:8px;">⚠️ Top 5 Scripts with Highest Failure Rates</h2>
+<table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+`)
 	if len(data.TopFailedApps) > 0 {
 		for i, app := range data.TopFailedApps {
-			b.WriteString(fmt.Sprintf("  %d. %-20s %3d/%3d fehlgeschlagen (%.1f%%)\n",
-				i+1, app.Name, app.Failed, app.Total, app.FailureRate))
+			bgColor := "#ffffff"
+			if i%2 == 0 {
+				bgColor = "#fef2f2"
+			}
+			rateColor := "#dc2626"
+			if app.FailureRate < 20 {
+				rateColor = "#ea580c"
+			}
+			if app.FailureRate < 10 {
+				rateColor = "#ca8a04"
+			}
+			b.WriteString(fmt.Sprintf(`<tr style="background:%s;">
+<td style="padding:12px 16px;border-radius:4px 0 0 4px;">
+<span style="font-weight:500;color:#1e293b;">%s</span>
+</td>
+<td style="padding:12px 16px;text-align:center;color:#64748b;">%d / %d failed</td>
+<td style="padding:12px 16px;text-align:right;border-radius:0 4px 4px 0;">
+<span style="background:%s;color:#ffffff;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600;">%.1f%%</span>
+</td>
+</tr>`, bgColor, app.Name, app.Failed, app.Total, rateColor, app.FailureRate))
 		}
 	} else {
-		b.WriteString("  Keine Fehler in dieser Woche! 🎉\n")
+		b.WriteString(`<tr><td style="padding:12px 16px;color:#16a34a;">🎉 No failures this week!</td></tr>`)
 	}
-	b.WriteString("\n")
+	b.WriteString(`</table>
+</td>
+</tr>
+`)
 
-	// Type distribution
+	// Type Distribution
 	if len(data.TypeDistribution) > 0 {
-		b.WriteString("────────────────────────────────────────────────────────────\n")
-		b.WriteString("📦 VERTEILUNG NACH TYP\n")
-		b.WriteString("────────────────────────────────────────────────────────────\n\n")
+		b.WriteString(`<tr>
+<td style="padding:0 40px 24px;">
+<h2 style="margin:0 0 16px;font-size:16px;color:#1e293b;border-bottom:2px solid #e2e8f0;padding-bottom:8px;">📦 Distribution by Type</h2>
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+`)
 		for t, count := range data.TypeDistribution {
 			percent := float64(count) / float64(data.TotalInstalls) * 100
-			b.WriteString(fmt.Sprintf("  %-10s %5d  (%.1f%%)\n", strings.ToUpper(t), count, percent))
+			b.WriteString(fmt.Sprintf(`<td style="padding:8px;">
+<div style="background:#f1f5f9;border-radius:8px;padding:16px;text-align:center;">
+<div style="font-size:24px;font-weight:700;color:#475569;">%d</div>
+<div style="font-size:12px;color:#64748b;margin-top:4px;">%s (%.1f%%)</div>
+</div>
+</td>`, count, strings.ToUpper(t), percent))
 		}
-		b.WriteString("\n")
+		b.WriteString(`</tr>
+</table>
+</td>
+</tr>
+`)
 	}
 
-	// OS distribution (top 5)
+	// OS Distribution
 	if len(data.OsDistribution) > 0 {
-		b.WriteString("────────────────────────────────────────────────────────────\n")
-		b.WriteString("🐧 TOP BETRIEBSSYSTEME\n")
-		b.WriteString("────────────────────────────────────────────────────────────\n\n")
-		
-		// Sort and get top 5 OS
+		b.WriteString(`<tr>
+<td style="padding:0 40px 24px;">
+<h2 style="margin:0 0 16px;font-size:16px;color:#1e293b;border-bottom:2px solid #e2e8f0;padding-bottom:8px;">🐧 Top Operating Systems</h2>
+<table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+`)
+		// Sort OS by count
 		type osEntry struct {
 			name  string
 			count int
@@ -583,7 +736,6 @@ func (a *Alerter) generateWeeklyReportEmail(data *WeeklyReportData) string {
 		for name, count := range data.OsDistribution {
 			osList = append(osList, osEntry{name, count})
 		}
-		// Simple bubble sort for top 5
 		for i := 0; i < len(osList); i++ {
 			for j := i + 1; j < len(osList); j++ {
 				if osList[j].count > osList[i].count {
@@ -596,15 +748,101 @@ func (a *Alerter) generateWeeklyReportEmail(data *WeeklyReportData) string {
 				break
 			}
 			percent := float64(os.count) / float64(data.TotalInstalls) * 100
-			b.WriteString(fmt.Sprintf("  %-15s %5d  (%.1f%%)\n", os.name, os.count, percent))
+			barWidth := int(percent * 2) // Scale for visual
+			if barWidth > 100 {
+				barWidth = 100
+			}
+			b.WriteString(fmt.Sprintf(`<tr>
+<td style="padding:8px 16px;width:100px;">%s</td>
+<td style="padding:8px 16px;">
+<div style="background:#e2e8f0;border-radius:4px;height:20px;width:100%%;">
+<div style="background:linear-gradient(90deg,#667eea,#764ba2);border-radius:4px;height:20px;width:%d%%;"></div>
+</div>
+</td>
+<td style="padding:8px 16px;text-align:right;width:80px;color:#64748b;">%d (%.1f%%)</td>
+</tr>`, os.name, barWidth, os.count, percent))
 		}
-		b.WriteString("\n")
+		b.WriteString(`</table>
+</td>
+</tr>
+`)
 	}
 
-	b.WriteString("═══════════════════════════════════════════════════════════\n")
-	b.WriteString(fmt.Sprintf("Erstellt: %s\n", time.Now().Format("02.01.2006 15:04:05")))
-	b.WriteString("\n---\n")
-	b.WriteString("Dies ist ein automatischer Bericht des Telemetrie-Service.\n")
+	// Footer
+	b.WriteString(`<tr>
+<td style="padding:24px 40px;background:#f8fafc;border-radius:0 0 12px 12px;border-top:1px solid #e2e8f0;">
+<p style="margin:0;font-size:12px;color:#64748b;text-align:center;">
+Generated `)
+	b.WriteString(time.Now().Format("Jan 02, 2006 at 15:04 MST"))
+	b.WriteString(`<br>
+<a href="https://github.com/community-scripts/ProxmoxVE" style="color:#667eea;text-decoration:none;">ProxmoxVE Helper Scripts</a> — 
+This is an automated report from the telemetry service.
+</p>
+</td>
+</tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>`)
+
+	return b.String()
+}
+
+// generateWeeklyReportEmail creates the plain text email body (kept for compatibility)
+func (a *Alerter) generateWeeklyReportEmail(data *WeeklyReportData) string {
+	var b strings.Builder
+
+	b.WriteString("ProxmoxVE Helper Scripts - Weekly Telemetry Report\n")
+	b.WriteString("==================================================\n\n")
+
+	b.WriteString(fmt.Sprintf("Calendar Week: %d, %d\n", data.CalendarWeek, data.Year))
+	b.WriteString(fmt.Sprintf("Period: %s - %s\n\n",
+		data.StartDate.Format("Jan 02, 2006"),
+		data.EndDate.Format("Jan 02, 2006")))
+
+	b.WriteString("OVERVIEW\n")
+	b.WriteString("--------\n")
+	b.WriteString(fmt.Sprintf("Total Installations:  %d\n", data.TotalInstalls))
+	b.WriteString(fmt.Sprintf("Successful:           %d\n", data.SuccessCount))
+	b.WriteString(fmt.Sprintf("Failed:               %d\n", data.FailedCount))
+	b.WriteString(fmt.Sprintf("Success Rate:         %.1f%%\n\n", data.SuccessRate))
+
+	if data.ComparedToPrev.InstallsChange != 0 || data.ComparedToPrev.FailRateChange != 0 {
+		b.WriteString("vs. Previous Week:\n")
+		b.WriteString(fmt.Sprintf("  Installations: %+d (%.1f%%)\n", data.ComparedToPrev.InstallsChange, data.ComparedToPrev.InstallsPercent))
+		b.WriteString(fmt.Sprintf("  Failure Rate:  %+.1f pp\n\n", data.ComparedToPrev.FailRateChange))
+	}
+
+	b.WriteString("TOP 5 INSTALLED SCRIPTS\n")
+	b.WriteString("-----------------------\n")
+	for i, app := range data.TopApps {
+		if i >= 5 {
+			break
+		}
+		b.WriteString(fmt.Sprintf("%d. %-25s %5d installs\n", i+1, app.Name, app.Total))
+	}
+	b.WriteString("\n")
+
+	b.WriteString("TOP 5 FAILED SCRIPTS\n")
+	b.WriteString("--------------------\n")
+	if len(data.TopFailedApps) > 0 {
+		for i, app := range data.TopFailedApps {
+			if i >= 5 {
+				break
+			}
+			b.WriteString(fmt.Sprintf("%d. %-20s %3d/%3d failed (%.1f%%)\n",
+				i+1, app.Name, app.Failed, app.Total, app.FailureRate))
+		}
+	} else {
+		b.WriteString("No failures this week!\n")
+	}
+	b.WriteString("\n")
+
+	b.WriteString("---\n")
+	b.WriteString(fmt.Sprintf("Generated: %s\n", time.Now().Format("Jan 02, 2006 15:04 MST")))
+	b.WriteString("This is an automated report from the telemetry service.\n")
 
 	return b.String()
 }
