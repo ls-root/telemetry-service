@@ -67,6 +67,7 @@ func (c *Cleaner) runCleanup() {
 	}
 
 	if len(stuckRecords) == 0 {
+		log.Printf("INFO: cleanup - no stuck installations found")
 		return
 	}
 
