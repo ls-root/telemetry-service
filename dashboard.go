@@ -1877,9 +1877,25 @@ func DashboardHTML() string {
                     }]
                 },
                 options: {
-                    ...chartDefaults,
+                    responsive: true,
+                    maintainAspectRatio: false,
                     indexAxis: 'y',
-                    plugins: { legend: { display: false } }
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            ticks: { 
+                                color: '#8b949e',
+                                stepSize: 1,
+                                callback: function(value) { return Number.isInteger(value) ? value : ''; }
+                            },
+                            grid: { color: '#30363d' }
+                        },
+                        y: {
+                            ticks: { color: '#8b949e' },
+                            grid: { color: '#30363d' }
+                        }
+                    }
                 }
             });
             
