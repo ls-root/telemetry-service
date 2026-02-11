@@ -973,6 +973,76 @@ func DashboardHTML() string {
             cursor: not-allowed;
         }
         
+        .footer-btn {
+            background: transparent;
+            border: none;
+            color: var(--accent-blue);
+            cursor: pointer;
+            font-size: 12px;
+            padding: 0;
+            margin-right: 8px;
+        }
+        
+        .footer-btn:hover {
+            text-decoration: underline;
+        }
+        
+        .health-modal {
+            max-width: 400px;
+        }
+        
+        .health-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+        
+        .health-status.ok {
+            background: rgba(63, 185, 80, 0.1);
+            border: 1px solid var(--accent-green);
+        }
+        
+        .health-status.error {
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--accent-red);
+        }
+        
+        .health-status .icon {
+            font-size: 32px;
+        }
+        
+        .health-status .details {
+            flex: 1;
+        }
+        
+        .health-status .title {
+            font-weight: 600;
+            font-size: 16px;
+        }
+        
+        .health-status .subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        .health-info {
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+        }
+        
+        .health-info div {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+        }
+        
         .pve-version-card {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -1464,12 +1534,21 @@ func DashboardHTML() string {
             &bull; Telemetry is anonymous and privacy-friendly
         </div>
         <div>
-            <a href="/healthz" target="_blank">Health Check</a> &bull;
-            <a href="/metrics" target="_blank">Metrics</a> &bull;
-            <a href="/api/dashboard" target="_blank">API</a> &bull;
-            <a href="/api/alerts" target="_blank">Alerts</a> &bull;
-            <button class="admin-btn" onclick="testAlert()" title="Send test alert email">📧 Test Alert</button>
-            <button class="admin-btn" onclick="testWeeklyReport()" title="Send weekly report now">📊 Test Report</button>
+            <button class="footer-btn" onclick="showHealthCheck()">Health Check</button>
+            <a href="/api/dashboard" target="_blank">API</a>
+        </div>
+    </div>
+    
+    <!-- Health Check Modal -->
+    <div class="modal-overlay" id="healthModal" onclick="closeHealthModal(event)">
+        <div class="modal-content health-modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>🏥 Health Check</h2>
+                <button class="modal-close" onclick="closeHealthModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="healthModalBody">
+                <div class="loading">Checking...</div>
+            </div>
         </div>
     </div>
     
@@ -2055,7 +2134,10 @@ func DashboardHTML() string {
         
         // Close modal with Escape key
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') closeModal();
+            if (e.key === 'Escape') {
+                closeModal();
+                closeHealthModal();
+            }
         });
         
         function filterTable() {
@@ -2095,50 +2177,50 @@ func DashboardHTML() string {
             URL.revokeObjectURL(url);
         }
         
-        async function testAlert() {
-            const btn = event.target;
-            btn.disabled = true;
-            btn.textContent = '⏳ Sending...';
+        async function showHealthCheck() {
+            const modal = document.getElementById('healthModal');
+            const body = document.getElementById('healthModalBody');
+            body.innerHTML = '<div class="loading">Checking...</div>';
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
             
             try {
-                const resp = await fetch('/api/alerts/test', { method: 'POST' });
-                if (resp.ok) {
-                    btn.textContent = '✅ Sent!';
-                    setTimeout(() => { btn.textContent = '📧 Test Alert'; btn.disabled = false; }, 3000);
-                } else {
-                    const text = await resp.text();
-                    alert('Alert failed: ' + text);
-                    btn.textContent = '❌ Failed';
-                    setTimeout(() => { btn.textContent = '📧 Test Alert'; btn.disabled = false; }, 3000);
+                const resp = await fetch('/healthz');
+                const data = await resp.json();
+                
+                const isOk = data.status === 'ok';
+                const statusClass = isOk ? 'ok' : 'error';
+                const icon = isOk ? '✅' : '❌';
+                const title = isOk ? 'All Systems Operational' : 'Service Degraded';
+                
+                let html = '<div class="health-status ' + statusClass + '">';
+                html += '<span class="icon">' + icon + '</span>';
+                html += '<div class="details">';
+                html += '<div class="title">' + title + '</div>';
+                html += '<div class="subtitle">Last checked: ' + new Date().toLocaleTimeString() + '</div>';
+                html += '</div></div>';
+                
+                html += '<div class="health-info">';
+                html += '<div><span>Status</span><span>' + data.status + '</span></div>';
+                html += '<div><span>Server Time</span><span>' + new Date(data.time).toLocaleString() + '</span></div>';
+                if (data.pocketbase) {
+                    html += '<div><span>PocketBase</span><span>' + (data.pocketbase === 'connected' ? '🟢 Connected' : '🔴 ' + data.pocketbase) + '</span></div>';
                 }
+                if (data.version) {
+                    html += '<div><span>Version</span><span>' + data.version + '</span></div>';
+                }
+                html += '</div>';
+                
+                body.innerHTML = html;
             } catch (e) {
-                alert('Error: ' + e.message);
-                btn.textContent = '📧 Test Alert';
-                btn.disabled = false;
+                body.innerHTML = '<div class="health-status error"><span class="icon">❌</span><div class="details"><div class="title">Connection Failed</div><div class="subtitle">' + e.message + '</div></div></div>';
             }
         }
         
-        async function testWeeklyReport() {
-            const btn = event.target;
-            btn.disabled = true;
-            btn.textContent = '⏳ Sending...';
-            
-            try {
-                const resp = await fetch('/api/alerts/weekly-report/test', { method: 'POST' });
-                if (resp.ok) {
-                    btn.textContent = '✅ Sent!';
-                    setTimeout(() => { btn.textContent = '📊 Test Report'; btn.disabled = false; }, 3000);
-                } else {
-                    const text = await resp.text();
-                    alert('Weekly report failed: ' + text);
-                    btn.textContent = '❌ Failed';
-                    setTimeout(() => { btn.textContent = '📊 Test Report'; btn.disabled = false; }, 3000);
-                }
-            } catch (e) {
-                alert('Error: ' + e.message);
-                btn.textContent = '📊 Test Report';
-                btn.disabled = false;
-            }
+        function closeHealthModal(event) {
+            if (event && event.target !== document.getElementById('healthModal')) return;
+            document.getElementById('healthModal').classList.remove('active');
+            document.body.style.overflow = '';
         }
         
         async function refreshData() {
