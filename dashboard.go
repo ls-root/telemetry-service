@@ -111,12 +111,17 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int) (*Dashboard
 
 	data := &DashboardData{}
 
-	// Calculate date filter
-	since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 00:00:00")
-	filter := url.QueryEscape(fmt.Sprintf("created >= '%s'", since))
+	// Calculate date filter (days=0 means all entries)
+	var filter string
+	if days > 0 {
+		since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 00:00:00")
+		filter = url.QueryEscape(fmt.Sprintf("created >= '%s'", since))
+	} else {
+		filter = "" // No filter = all entries
+	}
 
 	// Fetch all records for the period
-	records, err := p.fetchRecords(ctx, filter, 500)
+	records, err := p.fetchRecords(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -292,17 +297,22 @@ type TelemetryRecord struct {
 	Created string `json:"created"`
 }
 
-func (p *PBClient) fetchRecords(ctx context.Context, filter string, limit int) ([]TelemetryRecord, error) {
+func (p *PBClient) fetchRecords(ctx context.Context, filter string) ([]TelemetryRecord, error) {
 	var allRecords []TelemetryRecord
 	page := 1
-	perPage := 100
+	perPage := 500
 
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/api/collections/%s/records?filter=%s&sort=-created&page=%d&perPage=%d",
-				p.baseURL, p.targetColl, filter, page, perPage),
-			nil,
-		)
+		var url string
+		if filter != "" {
+			url = fmt.Sprintf("%s/api/collections/%s/records?filter=%s&sort=-created&page=%d&perPage=%d",
+				p.baseURL, p.targetColl, filter, page, perPage)
+		} else {
+			url = fmt.Sprintf("%s/api/collections/%s/records?sort=-created&page=%d&perPage=%d",
+				p.baseURL, p.targetColl, page, perPage)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -325,7 +335,7 @@ func (p *PBClient) fetchRecords(ctx context.Context, filter string, limit int) (
 
 		allRecords = append(allRecords, result.Items...)
 
-		if len(allRecords) >= limit || len(allRecords) >= result.TotalItems {
+		if len(allRecords) >= result.TotalItems {
 			break
 		}
 		page++
@@ -743,6 +753,36 @@ func DashboardHTML() string {
         button {
             background: var(--accent-blue);
             border-color: var(--accent-blue);
+            color: #fff;
+        }
+        
+        .quickfilter {
+            display: flex;
+            gap: 4px;
+            background: var(--bg-tertiary);
+            padding: 4px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .filter-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        
+        .filter-btn:hover {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        
+        .filter-btn.active {
+            background: var(--accent-blue);
             color: #fff;
         }
         
@@ -1373,13 +1413,13 @@ func DashboardHTML() string {
             Telemetry Dashboard
         </h1>
         <div class="controls">
-            <select id="timeRange">
-                <option value="7">Last 7 days</option>
-                <option value="14">Last 14 days</option>
-                <option value="30" selected>Last 30 days</option>
-                <option value="90">Last 90 days</option>
-                <option value="365">Last year</option>
-            </select>
+            <div class="quickfilter">
+                <button class="filter-btn" data-days="7">7 Days</button>
+                <button class="filter-btn active" data-days="30">30 Days</button>
+                <button class="filter-btn" data-days="90">90 Days</button>
+                <button class="filter-btn" data-days="365">1 Year</button>
+                <button class="filter-btn" data-days="0">All</button>
+            </div>
             <button class="export-btn" onclick="exportCSV()">Export CSV</button>
             <button onclick="refreshData()">Refresh</button>
             <button class="theme-toggle" onclick="toggleTheme()">
@@ -1634,7 +1674,8 @@ func DashboardHTML() string {
         };
         
         async function fetchData() {
-            const days = document.getElementById('timeRange').value;
+            const activeBtn = document.querySelector('.filter-btn.active');
+            const days = activeBtn ? activeBtn.dataset.days : '30';
             try {
                 const response = await fetch('/api/dashboard?days=' + days);
                 if (!response.ok) throw new Error('Failed to fetch data');
@@ -2238,8 +2279,14 @@ func DashboardHTML() string {
         refreshData();
         initSortableHeaders();
         
-        // Refresh on time range change
-        document.getElementById('timeRange').addEventListener('change', refreshData);
+        // Quickfilter button clicks
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
         
         // Auto-refresh every 60 seconds
         setInterval(refreshData, 60000);
