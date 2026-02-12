@@ -1,130 +1,130 @@
-# Technische und Organisatorische Maßnahmen (TOM)
+# Technical and Organizational Measures (TOM)
 
-**gemäß Art. 32 DSGVO**
-
----
-
-## 1. Vertraulichkeit (Art. 32 Abs. 1 lit. b DSGVO)
-
-### 1.1 Zutrittskontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Rechenzentrum | Hetzner Cloud (ISO 27001 zertifiziert) | ✅ |
-| Physischer Zugriff | Durch Hetzner gesichert (Biometrie, 24/7 Überwachung) | ✅ |
-
-### 1.2 Zugangskontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| SSH-Zugang | Nur mit SSH-Keys, kein Passwort-Login | ✅ |
-| API-Authentifizierung | PocketBase Admin-Token erforderlich | ✅ |
-| Dashboard-Zugriff | Lesezugriff ohne Authentifizierung (nur aggregierte Daten) | ✅ |
-| Admin-Zugriff | Über Coolify mit 2FA | ✅ |
-
-### 1.3 Zugriffskontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Berechtigungskonzept | Minimalprinzip: Service hat nur Schreibrechte auf telemetry-Collection | ✅ |
-| API-Endpunkte | Telemetrie-Endpoint: Nur POST, Dashboard-API: Nur GET | ✅ |
-| Keine Root-Prozesse | Container läuft mit non-root User | ✅ |
-
-### 1.4 Trennungskontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Datentrennung | Separate Collections für ProxmoxVE/ProxmoxVED | ✅ |
-| Netzwerktrennung | Docker-Network-Isolation | ✅ |
-| Umgebungstrennung | Produktion getrennt von Entwicklung | ✅ |
+**GDPR Art. 32 Compliance Documentation**
 
 ---
 
-## 2. Integrität (Art. 32 Abs. 1 lit. b DSGVO)
+## 1. Confidentiality (Art. 32(1)(b) GDPR)
 
-### 2.1 Weitergabekontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Transportverschlüsselung | TLS 1.3 (HTTPS) | ✅ |
-| Interne Kommunikation | Docker-internes Netzwerk | ✅ |
-| Keine Drittland-Übermittlung | Server ausschließlich in Deutschland | ✅ |
+### 1.1 Physical Access Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Data Center | Hetzner Cloud (ISO 27001 certified) | ✅ |
+| Physical Access | Secured by Hetzner (biometrics, 24/7 monitoring) | ✅ |
 
-### 2.2 Eingabekontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Request-Validierung | Strikte JSON-Schema-Validierung | ✅ |
-| Max Body Size | 1024 Bytes (verhindert Oversized Payloads) | ✅ |
-| Fehlermeldungen | Max. 120 Zeichen (verhindert Log-Injection) | ✅ |
-| Audit-Logging | Fehlerhafte Anfragen werden geloggt (ohne IP) | ✅ |
+### 1.2 System Access Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| SSH Access | SSH keys only, password login disabled | ✅ |
+| API Authentication | PocketBase admin token required | ✅ |
+| Dashboard Access | Read-only without authentication (aggregated data only) | ✅ |
+| Admin Access | Via Coolify with 2FA | ✅ |
 
----
+### 1.3 Data Access Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Authorization Concept | Least privilege: service only has write access to telemetry collection | ✅ |
+| API Endpoints | Telemetry endpoint: POST only, Dashboard API: GET only | ✅ |
+| Non-Root Processes | Container runs as non-root user | ✅ |
 
-## 3. Verfügbarkeit und Belastbarkeit (Art. 32 Abs. 1 lit. b/c DSGVO)
-
-### 3.1 Verfügbarkeitskontrolle
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Health-Checks | `/health`-Endpoint mit Docker HEALTHCHECK | ✅ |
-| Auto-Restart | Coolify startet Container bei Absturz neu | ✅ |
-| Rate Limiting | 60 Requests/Minute pro IP (DDoS-Schutz) | ✅ |
-| Timeout-Handling | 120s Timeout für Dashboard-Queries | ✅ |
-
-### 3.2 Wiederherstellbarkeit
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| Datensicherung | PocketBase SQLite-Backups durch Coolify | ✅ |
-| Backup-Intervall | Täglich | ✅ |
-| Disaster Recovery | Daten können aus Backup wiederhergestellt werden | ✅ |
+### 1.4 Separation Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Data Separation | Separate collections for ProxmoxVE/ProxmoxVED | ✅ |
+| Network Separation | Docker network isolation | ✅ |
+| Environment Separation | Production separated from development | ✅ |
 
 ---
 
-## 4. Verfahren zur regelmäßigen Überprüfung (Art. 32 Abs. 1 lit. d DSGVO)
+## 2. Integrity (Art. 32(1)(b) GDPR)
 
-### 4.1 Datenschutz-Management
-| Maßnahme | Umsetzung | Status |
-|----------|-----------|--------|
-| VVT vorhanden | [docs/VVT.md](VVT.md) | ✅ |
+### 2.1 Transfer Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Transport Encryption | TLS 1.3 (HTTPS) | ✅ |
+| Internal Communication | Docker internal network | ✅ |
+| Data Location | Server located in EU (Germany) | ✅ |
+
+### 2.2 Input Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Request Validation | Strict JSON schema validation | ✅ |
+| Max Body Size | 1024 bytes (prevents oversized payloads) | ✅ |
+| Error Messages | Max 120 characters (prevents log injection) | ✅ |
+| Audit Logging | Failed requests are logged (without IP) | ✅ |
+
+---
+
+## 3. Availability and Resilience (Art. 32(1)(b)(c) GDPR)
+
+### 3.1 Availability Control
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Health Checks | `/health` endpoint with Docker HEALTHCHECK | ✅ |
+| Auto-Restart | Coolify restarts container on crash | ✅ |
+| Rate Limiting | 60 requests/minute per IP (DDoS protection) | ✅ |
+| Timeout Handling | 120s timeout for dashboard queries | ✅ |
+
+### 3.2 Recoverability
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Data Backup | PocketBase SQLite backups via Coolify | ✅ |
+| Backup Interval | Daily | ✅ |
+| Disaster Recovery | Data can be restored from backup | ✅ |
+
+---
+
+## 4. Regular Testing and Evaluation (Art. 32(1)(d) GDPR)
+
+### 4.1 Privacy Management
+| Measure | Implementation | Status |
+|---------|----------------|--------|
+| Processing Records | [docs/ROPA.md](ROPA.md) | ✅ |
 | Security Policy | [SECURITY.md](../SECURITY.md) | ✅ |
-| Löschkonzept | Automatische Löschung nach 365 Tagen | ✅ |
+| Deletion Concept | Automatic deletion after 365 days | ✅ |
 
-### 4.2 Technische Prüfungen
-| Maßnahme | Intervall | Status |
-|----------|-----------|--------|
-| Dependency-Updates | Bei jedem Build (Go Modules) | ✅ |
-| Container-Updates | Alpine-Base regelmäßig aktualisiert | ✅ |
-| Code-Review | Alle Änderungen via Pull Request | ✅ |
+### 4.2 Technical Reviews
+| Measure | Interval | Status |
+|---------|----------|--------|
+| Dependency Updates | On every build (Go Modules) | ✅ |
+| Container Updates | Alpine base regularly updated | ✅ |
+| Code Review | All changes via Pull Request | ✅ |
 
 ---
 
-## 5. Privacy by Design / Privacy by Default (Art. 25 DSGVO)
+## 5. Privacy by Design / Privacy by Default (Art. 25 GDPR)
 
 ### 5.1 Privacy by Design
-| Prinzip | Umsetzung | Status |
-|---------|-----------|--------|
-| Datenminimierung | Nur technisch notwendige Daten werden erhoben | ✅ |
-| Anonymität | Keine personenbezogenen Daten, anonyme Session-IDs | ✅ |
-| Keine IP-Speicherung | `ENABLE_REQUEST_LOGGING=false` | ✅ |
+| Principle | Implementation | Status |
+|-----------|----------------|--------|
+| Data Minimization | Only technically necessary data is collected | ✅ |
+| Anonymity | No personal data, anonymous session IDs | ✅ |
+| No IP Storage | `ENABLE_REQUEST_LOGGING=false` | ✅ |
 
 ### 5.2 Privacy by Default
-| Einstellung | Standard | Status |
-|-------------|----------|--------|
-| Telemetrie | Opt-In (Nutzer muss aktiv zustimmen) | ✅ |
-| Request-Logging | Deaktiviert | ✅ |
-| Datenweitergabe | Keine | ✅ |
+| Setting | Default | Status |
+|---------|---------|--------|
+| Telemetry | Opt-in (user must actively consent) | ✅ |
+| Request Logging | Disabled | ✅ |
+| Data Sharing | None | ✅ |
 
 ---
 
-## 6. Auftragsverarbeitung
+## 6. Sub-Processors
 
-### 6.1 Dienstleister
-| Dienstleister | Funktion | Standort | Vertrag |
-|---------------|----------|----------|---------|
-| Hetzner Cloud | Infrastructure | Deutschland | AV-Vertrag vorhanden |
-| Coolify | Container-Orchestrierung | Self-Hosted | - |
-| GitHub | Source Code Hosting | USA | DPF-zertifiziert |
+### 6.1 Service Providers
+| Provider | Function | Location | Contract |
+|----------|----------|----------|----------|
+| Hetzner Cloud | Infrastructure | EU (Germany) | DPA in place |
+| Coolify | Container orchestration | Self-hosted | - |
+| GitHub | Source code hosting | USA | EU-US DPF certified |
 
-### 6.2 Keine Weitergabe an Dritte
-Die Telemetriedaten werden **nicht** an externe Analysedienste, Werbepartner oder sonstige Dritte weitergegeben.
+### 6.2 No Third-Party Sharing
+Telemetry data is **not** shared with external analytics services, advertising partners, or any other third parties.
 
 ---
 
-## 7. Technische Schutzmaßnahmen im Code
+## 7. Technical Security Measures in Code
 
 ```go
 // service.go - Security Headers
@@ -133,34 +133,34 @@ w.Header().Set("X-Frame-Options", "DENY")
 w.Header().Set("Referrer-Policy", "no-referrer")
 
 // Rate Limiting
-RateLimitRPM: 60       // Max 60 Requests pro Minute
-RateBurst:    20       // Burst-Limit
-MaxBodyBytes: 1024     // Max 1KB Request-Body
+RateLimitRPM: 60       // Max 60 requests per minute
+RateBurst:    20       // Burst limit
+MaxBodyBytes: 1024     // Max 1KB request body
 
-// Keine IP-Speicherung
+// No IP Storage
 EnableReqLogging: false
 ```
 
 ---
 
-## 8. Maßnahmen bei Datenschutzverletzungen
+## 8. Data Breach Response
 
-| Schritt | Verantwortlich | Frist |
-|---------|----------------|-------|
-| Erkennung | Automatisch (Monitoring) oder via GitHub Issue | - |
-| Ersteinschätzung | Maintainer | 24 Stunden |
-| Meldung an Aufsichtsbehörde | N/A (keine personenbezogenen Daten) | - |
-| Benachrichtigung Betroffener | N/A (keine personenbezogenen Daten) | - |
-| Dokumentation | GitHub Security Advisory | 7 Tage |
-
----
-
-## 9. Änderungshistorie
-
-| Datum | Version | Änderung | Autor |
-|-------|---------|----------|-------|
-| 2026-02-12 | 1.0 | Initiale Erstellung | Community Scripts Team |
+| Step | Responsible | Timeframe |
+|------|-------------|-----------|
+| Detection | Automatic (monitoring) or via GitHub Issue | - |
+| Initial Assessment | Maintainer | 24 hours |
+| Supervisory Authority Notification | N/A (no personal data) | - |
+| Data Subject Notification | N/A (no personal data) | - |
+| Documentation | GitHub Security Advisory | 7 days |
 
 ---
 
-*Diese Dokumentation wird bei wesentlichen Änderungen am Service aktualisiert.*
+## 9. Revision History
+
+| Date | Version | Change | Author |
+|------|---------|--------|--------|
+| 2025-02-12 | 1.0 | Initial creation | Community Scripts Team |
+
+---
+
+*This documentation is updated when significant changes are made to the service.*
