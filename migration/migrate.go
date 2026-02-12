@@ -159,6 +159,29 @@ func parseMongoDate(raw json.RawMessage) string {
 	return ""
 }
 
+// parseMongoString extracts string from MongoDB $numberLong or plain string/number
+func parseMongoString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try $numberLong first (MongoDB exports IDs as numbers sometimes)
+	var numLong MongoNumberLong
+	if err := json.Unmarshal(raw, &numLong); err == nil && numLong.Value != "" {
+		return numLong.Value
+	}
+	// Try plain string
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Try plain number
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return strconv.FormatInt(n, 10)
+	}
+	return ""
+}
+
 // convertMongoToOld converts MongoDB format to OldDataModel
 func convertMongoToOld(m MongoDataModel) OldDataModel {
 	errorStr := ""
@@ -1092,10 +1115,21 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 	// Create buffered reader
 	reader := bufio.NewReaderSize(file, 16*1024*1024)
 
-	// Skip initial '[' 
-	firstByte, err := reader.ReadByte()
-	if err != nil || firstByte != '[' {
-		fmt.Printf("[ERROR] Invalid JSON array format\n")
+	// Skip BOM and whitespace, find the opening '[' 
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			fmt.Printf("[ERROR] Cannot read JSON file: %v\n", err)
+			os.Exit(1)
+		}
+		// Skip UTF-8 BOM (EF BB BF) and whitespace
+		if b == 0xEF || b == 0xBB || b == 0xBF || b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		if b == '[' {
+			break // Found the start of array
+		}
+		fmt.Printf("[ERROR] Invalid JSON array format (expected '[', got 0x%02X '%c')\n", b, b)
 		os.Exit(1)
 	}
 
