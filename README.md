@@ -44,7 +44,47 @@ This service acts as a telemetry ingestion layer between the bash installation s
 │  Bash Scripts   │────▶│ Telemetry Service │────▶│ PocketBase │
 │ (ProxmoxVE/VED) │     │    (this repo)    │     │  Database  │
 └─────────────────┘     └───────────────────┘     └────────────┘
+                               │
+                               ▼
+                        ┌────────────┐
+                        │ Dashboard  │
+                        │   (HTML)   │
+                        └────────────┘
 ```
+
+## Configuration
+
+Environment variables for deployment:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POCKETBASE_URL` | PocketBase API URL | `http://localhost:8090` |
+| `POCKETBASE_TOKEN` | Admin API token | - |
+| `RATE_LIMIT` | Requests per minute per IP | `60` |
+| `CACHE_TTL_SECONDS` | Dashboard cache TTL | `300` |
+| `SMTP_HOST` | SMTP server for alerts | - |
+| `SMTP_PORT` | SMTP port | `587` |
+| `SMTP_USER` | SMTP username | - |
+| `SMTP_PASS` | SMTP password | - |
+| `ALERT_EMAIL` | Alert recipient email | - |
+| `FAILURE_THRESHOLD` | Failure rate % for alerts | `20` |
+
+## Dashboard
+
+The built-in dashboard (`/dashboard`) provides real-time analytics:
+
+- **Installation Statistics** - Total installs, success/failure rates
+- **Top Applications** - Most installed scripts with counts
+- **Failure Analysis** - Scripts with highest failure rates (min. 10 installs)
+- **Resource Trends** - CPU, RAM, disk allocation over time
+- **OS Distribution** - Popular operating systems
+- **Proxmox Versions** - PVE version distribution
+
+**Dashboard Features:**
+- Automatic cache warmup (every 4 minutes)
+- Configurable time range (7, 30, 90, 365 days)
+- Shows actual total count vs. analyzed sample size
+- Loading indicator during data fetch
 
 ## Project Structure
 
@@ -65,6 +105,34 @@ This service acts as a telemetry ingestion layer between the bash installation s
 
 - [ProxmoxVE](https://github.com/community-scripts/ProxmoxVE) - Proxmox VE Helper Scripts
 - [ProxmoxVED](https://github.com/community-scripts/ProxmoxVED) - Proxmox VE Helper Scripts (Dev)
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | POST | Receive telemetry data from scripts |
+| `/health` | GET | Health check endpoint |
+| `/dashboard` | GET | HTML dashboard UI |
+| `/api/dashboard` | GET | Dashboard data as JSON |
+
+## Deployment
+
+### Docker (recommended)
+
+```bash
+docker run -d \
+  -e POCKETBASE_URL=http://pocketbase:8090 \
+  -e POCKETBASE_TOKEN=your_token \
+  -p 8080:8080 \
+  ghcr.io/community-scripts/telemetry-service:latest
+```
+
+### Coolify
+
+1. Create a new service from this Git repository
+2. Set the required environment variables
+3. Configure the network to reach your PocketBase instance
+4. Deploy
 
 ## Privacy & Compliance
 
