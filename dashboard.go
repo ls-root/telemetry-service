@@ -65,13 +65,15 @@ type TypeCount struct {
 }
 
 type ErrorGroup struct {
-	Pattern string `json:"pattern"`
-	Count   int    `json:"count"`
-	Apps    string `json:"apps"` // Comma-separated list of affected apps
+	Pattern    string `json:"pattern"`
+	Count      int    `json:"count"`       // Total error occurrences
+	UniqueApps int    `json:"unique_apps"` // Number of unique apps affected
+	Apps       string `json:"apps"`        // Comma-separated list of affected apps
 }
 
 type AppFailure struct {
 	App         string  `json:"app"`
+	Type        string  `json:"type"`
 	TotalCount  int     `json:"total_count"`
 	FailedCount int     `json:"failed_count"`
 	FailureRate float64 `json:"failure_rate"`
@@ -146,14 +148,18 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 
 	// Aggregate statistics
 	appCounts := make(map[string]int)
-	appFailures := make(map[string]int)
 	osCounts := make(map[string]int)
 	methodCounts := make(map[string]int)
 	pveCounts := make(map[string]int)
 	typeCounts := make(map[string]int)
-	errorPatterns := make(map[string]map[string]bool) // pattern -> set of apps
+	errorApps := make(map[string]map[string]bool) // pattern -> set of apps
+	errorCounts := make(map[string]int)            // pattern -> total occurrences
 	dailySuccess := make(map[string]int)
 	dailyFailed := make(map[string]int)
+
+	// Failure tracking per app+type
+	appTypeCounts := make(map[string]int)
+	appTypeFailures := make(map[string]int)
 
 	// Extended metrics maps
 	gpuCounts := make(map[string]int)              // "vendor|passthrough" -> count
@@ -170,18 +176,15 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			data.SuccessCount++
 		case "failed":
 			data.FailedCount++
-			// Track failed apps
-			if r.NSAPP != "" {
-				appFailures[r.NSAPP]++
-			}
 			// Group errors by pattern
 			if r.Error != "" {
 				pattern := normalizeError(r.Error)
-				if errorPatterns[pattern] == nil {
-					errorPatterns[pattern] = make(map[string]bool)
+				errorCounts[pattern]++
+				if errorApps[pattern] == nil {
+					errorApps[pattern] = make(map[string]bool)
 				}
 				if r.NSAPP != "" {
-					errorPatterns[pattern][r.NSAPP] = true
+					errorApps[pattern][r.NSAPP] = true
 				}
 			}
 		case "installing":
@@ -191,6 +194,16 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		// Count apps
 		if r.NSAPP != "" {
 			appCounts[r.NSAPP]++
+			// Track per app+type for failure rates
+			typeLabel := r.Type
+			if typeLabel == "" {
+				typeLabel = "unknown"
+			}
+			ftKey := r.NSAPP + "|" + typeLabel
+			appTypeCounts[ftKey]++
+			if r.Status == "failed" {
+				appTypeFailures[ftKey]++
+			}
 		}
 
 		// Count OS
@@ -272,10 +285,10 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	data.TypeStats = topNType(typeCounts, 10)
 
 	// Error analysis
-	data.ErrorAnalysis = buildErrorAnalysis(errorPatterns, 15)
+	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
 	// Failed apps with failure rates (min 10 installs threshold)
-	data.FailedApps = buildFailedApps(appCounts, appFailures, 15)
+	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 15)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
@@ -516,25 +529,26 @@ func normalizeError(err string) string {
 	return err
 }
 
-func buildErrorAnalysis(patterns map[string]map[string]bool, n int) []ErrorGroup {
-	result := make([]ErrorGroup, 0, len(patterns))
+func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, n int) []ErrorGroup {
+	result := make([]ErrorGroup, 0, len(apps))
 
-	for pattern, apps := range patterns {
-		appList := make([]string, 0, len(apps))
-		for app := range apps {
+	for pattern, appSet := range apps {
+		appList := make([]string, 0, len(appSet))
+		for app := range appSet {
 			appList = append(appList, app)
 		}
 
 		// Limit app list display
 		appsStr := strings.Join(appList, ", ")
-		if len(appsStr) > 50 {
-			appsStr = appsStr[:47] + "..."
+		if len(appsStr) > 80 {
+			appsStr = appsStr[:77] + "..."
 		}
 
 		result = append(result, ErrorGroup{
-			Pattern: pattern,
-			Count:   len(apps), // Number of unique apps with this error
-			Apps:    appsStr,
+			Pattern:    pattern,
+			Count:      counts[pattern],
+			UniqueApps: len(appSet),
+			Apps:       appsStr,
 		})
 	}
 
@@ -557,15 +571,24 @@ func buildFailedApps(total, failed map[string]int, n int) []AppFailure {
 	result := make([]AppFailure, 0)
 	minInstalls := 10 // Minimum installations to be considered (avoid noise from rare apps)
 
-	for app, failCount := range failed {
-		totalCount := total[app]
+	for key, failCount := range failed {
+		totalCount := total[key]
 		if totalCount < minInstalls {
 			continue // Skip apps with too few installations
+		}
+
+		// Parse composite key "app|type"
+		parts := strings.SplitN(key, "|", 2)
+		app := parts[0]
+		appType := ""
+		if len(parts) > 1 {
+			appType = parts[1]
 		}
 
 		rate := float64(failCount) / float64(totalCount) * 100
 		result = append(result, AppFailure{
 			App:         app,
+			Type:        appType,
 			TotalCount:  totalCount,
 			FailedCount: failCount,
 			FailureRate: rate,
@@ -886,8 +909,8 @@ func DashboardHTML() string {
         
         /* Main Content */
         .main-content {
-            padding: 32px;
-            max-width: 1600px;
+            padding: 24px 40px;
+            max-width: 1920px;
             margin: 0 auto;
         }
         
@@ -910,7 +933,7 @@ func DashboardHTML() string {
         /* Stat Cards Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 20px;
             margin-bottom: 32px;
         }
@@ -1636,6 +1659,124 @@ func DashboardHTML() string {
             color: var(--text-secondary);
         }
         
+        .failed-app-card .type-badge {
+            font-size: 10px;
+            padding: 2px 6px;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+        
+        /* Error Analysis List */
+        .error-list {
+            padding: 16px 24px;
+        }
+        
+        .error-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 16px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+        
+        .error-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .error-item .pattern {
+            font-weight: 600;
+            font-size: 14px;
+            color: var(--accent-red);
+            margin-bottom: 4px;
+        }
+        
+        .error-item .meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        .count-badge {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--accent-red);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        
+        /* Podium Section */
+        .podium-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+        
+        .podium-section h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 24px;
+            color: var(--text-secondary);
+        }
+        
+        .podium {
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .podium-step {
+            flex: 1;
+            text-align: center;
+        }
+        
+        .podium-medal {
+            font-size: 32px;
+            margin-bottom: 8px;
+        }
+        
+        .podium-app {
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            word-break: break-word;
+            color: var(--text-primary);
+        }
+        
+        .podium-count {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+        
+        .podium-bar {
+            border-radius: 8px 8px 0 0;
+            width: 100%;
+        }
+        
+        .podium-step.first .podium-bar {
+            height: 120px;
+            background: linear-gradient(180deg, #ffd700 0%, #b8860b 100%);
+        }
+        
+        .podium-step.second .podium-bar {
+            height: 85px;
+            background: linear-gradient(180deg, #c0c0c0 0%, #808080 100%);
+        }
+        
+        .podium-step.third .podium-bar {
+            height: 55px;
+            background: linear-gradient(180deg, #cd7f32 0%, #8b4513 100%);
+        }
+        
         .pagination {
             display: flex;
             justify-content: center;
@@ -1964,18 +2105,30 @@ func DashboardHTML() string {
                 <div class="stat-card-value" id="failedCount">-</div>
                 <div class="stat-card-subtitle">Installations encountered errors</div>
             </div>
-            
-            <div class="stat-card popular">
-                <div class="stat-card-header">
-                    <span class="stat-card-label">Most Popular</span>
-                    <div class="stat-card-icon">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z"/>
-                        </svg>
-                    </div>
+        </div>
+        
+        <!-- Most Popular Podium -->
+        <div class="podium-section">
+            <h2>🏆 Most Popular Applications</h2>
+            <div class="podium">
+                <div class="podium-step second">
+                    <div class="podium-medal">🥈</div>
+                    <div class="podium-app" id="podium2App">-</div>
+                    <div class="podium-count" id="podium2Count">-</div>
+                    <div class="podium-bar"></div>
                 </div>
-                <div class="stat-card-value" id="mostPopular">-</div>
-                <div class="stat-card-subtitle" id="popularSubtitle">installations</div>
+                <div class="podium-step first">
+                    <div class="podium-medal">🥇</div>
+                    <div class="podium-app" id="podium1App">-</div>
+                    <div class="podium-count" id="podium1Count">-</div>
+                    <div class="podium-bar"></div>
+                </div>
+                <div class="podium-step third">
+                    <div class="podium-medal">🥉</div>
+                    <div class="podium-app" id="podium3App">-</div>
+                    <div class="podium-count" id="podium3Count">-</div>
+                    <div class="podium-bar"></div>
+                </div>
             </div>
         </div>
         
@@ -2006,16 +2159,22 @@ func DashboardHTML() string {
         </div>
         
         <!-- Secondary Charts -->
-        <div class="charts-grid">
-            <div class="chart-card">
-                <h3>Installations Over Time</h3>
-                <div class="chart-wrapper">
-                    <canvas id="dailyChart"></canvas>
+        <div class="section-card" style="margin-bottom: 24px;">
+            <div class="section-header">
+                <div>
+                    <h2>Installations Over Time</h2>
+                    <p>Daily success and failure trends.</p>
                 </div>
             </div>
+            <div style="padding: 24px; height: 320px;">
+                <canvas id="dailyChart"></canvas>
+            </div>
+        </div>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
             <div class="chart-card">
                 <h3>OS Distribution</h3>
-                <div class="chart-wrapper">
+                <div class="chart-wrapper" style="height: 260px;">
                     <canvas id="osChart"></canvas>
                 </div>
             </div>
@@ -2301,11 +2460,17 @@ func DashboardHTML() string {
             document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
             document.getElementById('error').style.display = 'none';
             
-            // Most Popular App
-            if (data.top_apps && data.top_apps.length > 0) {
-                const topApp = data.top_apps[0];
-                document.getElementById('mostPopular').textContent = topApp.app;
-                document.getElementById('popularSubtitle').textContent = topApp.count.toLocaleString() + ' installations';
+            // Most Popular - update podium
+            if (data.top_apps && data.top_apps.length >= 3) {
+                document.getElementById('podium1App').textContent = data.top_apps[0].app;
+                document.getElementById('podium1Count').textContent = data.top_apps[0].count.toLocaleString() + ' installs';
+                document.getElementById('podium2App').textContent = data.top_apps[1].app;
+                document.getElementById('podium2Count').textContent = data.top_apps[1].count.toLocaleString() + ' installs';
+                document.getElementById('podium3App').textContent = data.top_apps[2].app;
+                document.getElementById('podium3Count').textContent = data.top_apps[2].count.toLocaleString() + ' installs';
+            } else if (data.top_apps && data.top_apps.length > 0) {
+                document.getElementById('podium1App').textContent = data.top_apps[0].app;
+                document.getElementById('podium1Count').textContent = data.top_apps[0].count.toLocaleString() + ' installs';
             }
             
             // Store all apps data for View All feature
@@ -2329,9 +2494,9 @@ func DashboardHTML() string {
                 '<div class="error-item">' +
                     '<div>' +
                         '<div class="pattern">' + escapeHtml(e.pattern) + '</div>' +
-                        '<div class="meta">Affects: ' + escapeHtml(e.apps) + '</div>' +
+                        '<div class="meta">' + e.unique_apps + ' apps affected: ' + escapeHtml(e.apps) + '</div>' +
                     '</div>' +
-                    '<span class="count-badge">' + e.count + '</span>' +
+                    '<span class="count-badge">' + e.count.toLocaleString() + ' occurrences</span>' +
                 '</div>'
             ).join('');
         }
@@ -2343,13 +2508,15 @@ func DashboardHTML() string {
                 return;
             }
             
-            container.innerHTML = apps.slice(0, 8).map(a => 
-                '<div class="failed-app-card">' +
-                    '<div class="app-name">' + escapeHtml(a.app) + '</div>' +
+            container.innerHTML = apps.slice(0, 8).map(a => {
+                const typeClass = (a.type || '').toLowerCase();
+                const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span> ' : '';
+                return '<div class="failed-app-card">' +
+                    '<div class="app-name">' + typeBadge + escapeHtml(a.app) + '</div>' +
                     '<div class="failure-rate">' + a.failure_rate.toFixed(1) + '%</div>' +
                     '<div class="details">' + a.failed_count + ' / ' + a.total_count + ' failed</div>' +
-                '</div>'
-            ).join('');
+                '</div>';
+            }).join('');
         }
         
         function escapeHtml(str) {
@@ -2514,23 +2681,44 @@ func DashboardHTML() string {
                 }
             });
             
-            // OS distribution pie chart
+            // OS distribution - horizontal bar chart
             if (charts.os) charts.os.destroy();
             charts.os = new Chart(document.getElementById('osChart'), {
-                type: 'doughnut',
+                type: 'bar',
                 data: {
                     labels: data.os_distribution.map(o => o.os),
                     datasets: [{
                         data: data.os_distribution.map(o => o.count),
                         backgroundColor: appBarColors.slice(0, data.os_distribution.length),
-                        borderWidth: 0
+                        borderRadius: 4,
+                        borderSkipped: false
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    indexAxis: 'y',
                     plugins: {
-                        legend: { position: 'right', labels: { color: '#8b949e', padding: 12 } }
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(ctx) {
+                                    return ctx.parsed.x.toLocaleString() + ' installations';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#8b949e',
+                                callback: function(v) { return v >= 1000 ? (v/1000).toFixed(0) + 'k' : v; }
+                            },
+                            grid: { color: '#2d3748' }
+                        },
+                        y: {
+                            ticks: { color: '#8b949e' },
+                            grid: { display: false }
+                        }
                     }
                 }
             });

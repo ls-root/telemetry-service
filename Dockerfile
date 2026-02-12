@@ -22,7 +22,7 @@ ENV ENABLE_REQUEST_LOGGING="false"
 
 # Cache config
 ENV ENABLE_CACHE="true"
-ENV CACHE_TTL_SECONDS="300"
+ENV CACHE_TTL_SECONDS="600"
 ENV ENABLE_REDIS="false"
 
 # Alert config (optional)

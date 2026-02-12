@@ -1124,8 +1124,8 @@ func main() {
 			time.Sleep(10 * time.Second)
 			warmupDashboardCache(pb, cache, cfg)
 			
-			// Periodic refresh (every 4 minutes, before 5-minute TTL expires)
-			ticker := time.NewTicker(4 * time.Minute)
+			// Periodic refresh (every 8 minutes, before 10-minute TTL expires)
+			ticker := time.NewTicker(8 * time.Minute)
 			for range ticker.C {
 				warmupDashboardCache(pb, cache, cfg)
 			}
@@ -1225,8 +1225,8 @@ func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
 	log.Println("[CACHE] Starting dashboard cache warmup...")
 	
 	// Common day ranges and repos to pre-cache
-	dayRanges := []int{7, 30, 90}
-	repos := []string{"ProxmoxVE", ""}  // ProxmoxVE and "all"
+	dayRanges := []int{7, 30, 90, 365}
+	repos := []string{"ProxmoxVE", "ProxmoxVED", ""}  // ProxmoxVE, ProxmoxVED, and "all"
 	
 	warmed := 0
 	for _, days := range dayRanges {
