@@ -1200,11 +1200,6 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 			nsapp = "unknown"
 		}
 
-		disableip6 := record.DisableIP6
-		if disableip6 == "" {
-			disableip6 = "no"
-		}
-
 		recType := record.Type
 		if recType == "" {
 			recType = "lxc"
@@ -1221,9 +1216,9 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 			return strings.ReplaceAll(s, "'", "''")
 		}
 
-		// Write INSERT statement
+		// Write INSERT statement (disableip6 removed - column no longer exists)
 		sql := fmt.Sprintf(
-			"INSERT OR IGNORE INTO %s (id,created,updated,ct_type,disk_size,core_count,ram_size,os_type,os_version,disableip6,nsapp,method,pve_version,status,random_id,type,error,repo_source) VALUES ('%s','%s','%s',%d,%d,%d,%d,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s','%s');\n",
+			"INSERT OR IGNORE INTO %s (id,created,updated,ct_type,disk_size,core_count,ram_size,os_type,os_version,nsapp,method,pve_version,status,random_id,type,error,repo_source) VALUES ('%s','%s','%s',%d,%d,%d,%d,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s');\n",
 			tableName,
 			pbID,
 			escapeSQLString(createdAt),
@@ -1234,7 +1229,6 @@ func runSQLExport(jsonFile, sqlOutput, tableName string) {
 			record.RamSize,
 			escapeSQLString(record.OsType),
 			escapeSQLString(record.OsVersion),
-			escapeSQLString(disableip6),
 			escapeSQLString(nsapp),
 			escapeSQLString(record.Method),
 			escapeSQLString(record.PveVersion),
