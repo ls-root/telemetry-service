@@ -2100,8 +2100,8 @@ func DashboardHTML() string {
             <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
-                    <button class="filter-btn" data-days="1">Today</button>
-                    <button class="filter-btn active" data-days="7">7 Days</button>
+                    <button class="filter-btn active" data-days="1">Today</button>
+                    <button class="filter-btn" data-days="7">7 Days</button>
                     <button class="filter-btn" data-days="30">30 Days</button>
                     <button class="filter-btn" data-days="90">90 Days</button>
                     <button class="filter-btn" data-days="365">1 Year</button>
@@ -2485,7 +2485,7 @@ func DashboardHTML() string {
         
         async function fetchData() {
             const activeBtn = document.querySelector('.filter-btn.active');
-            const days = activeBtn ? activeBtn.dataset.days : '7';
+            const days = activeBtn ? activeBtn.dataset.days : '1';
             const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
             
             // Show loading indicator
@@ -2840,7 +2840,11 @@ func DashboardHTML() string {
             const type = document.getElementById('filterType').value;
             
             try {
-                let url = '/api/records?page=' + currentPage + '&limit=' + perPage;
+                const activeBtn = document.querySelector('.filter-btn.active');
+                const days = activeBtn ? activeBtn.dataset.days : '1';
+                const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+                
+                let url = '/api/records?page=' + currentPage + '&limit=' + perPage + '&days=' + days + '&repo=' + encodeURIComponent(repo);
                 if (status) url += '&status=' + encodeURIComponent(status);
                 if (app) url += '&app=' + encodeURIComponent(app);
                 if (os) url += '&os=' + encodeURIComponent(os);
@@ -3166,6 +3170,9 @@ func DashboardHTML() string {
                 updateStats(data);
                 updateCharts(data);
                 updateTable(data.recent_records);
+                // Also refresh paginated Installation Log with current filters
+                currentPage = 1;
+                fetchPaginatedRecords();
             } catch (e) {
                 console.error(e);
             }

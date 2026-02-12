@@ -309,13 +309,18 @@ func (p *PBClient) UpdateTelemetryStatus(ctx context.Context, recordID string, u
 }
 
 // FetchRecordsPaginated retrieves records with pagination and optional filters.
-func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string) ([]TelemetryRecord, int, error) {
+func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, status, app, osType, typeFilter, sortField, repoSource string, days int) ([]TelemetryRecord, int, error) {
 	if err := p.ensureAuth(ctx); err != nil {
 		return nil, 0, err
 	}
 
 	// Build filter
 	var filters []string
+	// Date filter
+	if days > 0 {
+		since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 00:00:00")
+		filters = append(filters, fmt.Sprintf("created >= '%s'", since))
+	}
 	if status != "" {
 		filters = append(filters, fmt.Sprintf("status='%s'", status))
 	}
@@ -896,11 +901,11 @@ func main() {
 
 	// Dashboard API endpoint (with caching)
 	mux.HandleFunc("/api/dashboard", func(w http.ResponseWriter, r *http.Request) {
-		days := 7 // Default: 7 days
+		days := 1 // Default: Today
 		if d := r.URL.Query().Get("days"); d != "" {
 			fmt.Sscanf(d, "%d", &days)
 			if days < 0 {
-				days = 7
+				days = 1
 			}
 			// Cap to 365 days to prevent unbounded queries that timeout
 			if days == 0 || days > 365 {
@@ -983,6 +988,21 @@ func main() {
 		if repoSource == "" {
 			repoSource = "ProxmoxVE" // Default filter: production data
 		}
+		if repoSource == "all" {
+			repoSource = ""
+		}
+
+		// Days filter for Installation Log (default: 1 = today)
+		days := 1
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 0 {
+				days = 1
+			}
+			if days == 0 || days > 365 {
+				days = 365
+			}
+		}
 
 		if p := r.URL.Query().Get("page"); p != "" {
 			fmt.Sscanf(p, "%d", &page)
@@ -1003,7 +1023,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
-		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource)
+		records, total, err := pb.FetchRecordsPaginated(ctx, page, limit, status, app, osType, typeFilter, sort, repoSource, days)
 		if err != nil {
 			log.Printf("records fetch failed: %v", err)
 			http.Error(w, "failed to fetch records", http.StatusInternalServerError)
