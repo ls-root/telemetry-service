@@ -621,7 +621,7 @@ var (
 	// Allowed values for 'error_category' field
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
-		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
+		"timeout": true, "config": true, "resource": true, "aborted": true, "unknown": true, "": true,
 	}
 )
 
