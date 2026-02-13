@@ -2599,7 +2599,9 @@ func DashboardHTML() string {
             document.getElementById('cacheStatus').textContent = '';
             
             try {
-                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo);
+                // Add cache-busting timestamp for filter changes to ensure fresh data
+                const cacheBuster = '&_t=' + Date.now();
+                const response = await fetch('/api/dashboard?days=' + days + '&repo=' + repo + cacheBuster);
                 if (!response.ok) throw new Error('Failed to fetch data');
                 
                 // Check cache status from header
