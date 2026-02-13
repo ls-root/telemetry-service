@@ -392,7 +392,8 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, 0, fmt.Errorf("pocketbase fetch failed: %s", resp.Status)
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, 0, fmt.Errorf("pocketbase fetch failed: %s: %s (url=%s)", resp.Status, strings.TrimSpace(string(rb)), reqURL)
 	}
 
 	var result struct {
@@ -607,6 +608,10 @@ var (
 		"debian": true, "ubuntu": true, "alpine": true, "devuan": true,
 		"fedora": true, "rocky": true, "alma": true, "centos": true,
 		"opensuse": true, "gentoo": true, "openeuler": true,
+		// VM-specific OS types
+		"homeassistant": true, "opnsense": true, "openwrt": true,
+		"arch-linux": true, "mikrotik": true, "pimox-haos": true,
+		"turnkey-nextcloud": true, "owncloud": true, "umbrel-os": true,
 	}
 
 	// Allowed values for 'gpu_vendor' field
