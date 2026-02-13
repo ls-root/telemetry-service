@@ -319,7 +319,14 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	var filters []string
 	// Date filter
 	if days > 0 {
-		since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 00:00:00")
+		var since string
+		if days == 1 {
+			// "Today" = since midnight today (not yesterday)
+			since = time.Now().Format("2006-01-02") + " 00:00:00"
+		} else {
+			// N days = today + (N-1) previous days
+			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+		}
 		filters = append(filters, fmt.Sprintf("created >= '%s'", since))
 	}
 	if status != "" {
@@ -969,9 +976,23 @@ func main() {
 			return
 		}
 
-		// Cache the result
+		// Cache the result with dynamic TTL based on period
 		if cfg.CacheEnabled {
-			_ = cache.Set(ctx, cacheKey, data, cfg.CacheTTL)
+			// Short periods change faster → shorter cache TTL
+			cacheTTL := cfg.CacheTTL
+			switch {
+			case days <= 1:
+				cacheTTL = 30 * time.Second // Today: 30s cache
+			case days <= 7:
+				cacheTTL = 2 * time.Minute // 7 Days: 2min cache
+			case days <= 30:
+				cacheTTL = 5 * time.Minute // 30 Days: 5min cache
+			case days <= 90:
+				cacheTTL = 15 * time.Minute // 90 Days: 15min cache
+			default:
+				cacheTTL = 30 * time.Minute // 1 Year+: 30min cache
+			}
+			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

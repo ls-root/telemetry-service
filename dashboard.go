@@ -122,7 +122,14 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 
 	// Date filter (days=0 means all entries)
 	if days > 0 {
-		since := time.Now().AddDate(0, 0, -days).Format("2006-01-02 00:00:00")
+		var since string
+		if days == 1 {
+			// "Today" = since midnight today (not yesterday)
+			since = time.Now().Format("2006-01-02") + " 00:00:00"
+		} else {
+			// N days = today + (N-1) previous days
+			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
 
@@ -291,19 +298,18 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
 	// Failed apps with failure rates - dynamic threshold based on time period
-	// Shorter periods = lower threshold (less data available)
 	minInstalls := 10 // default
 	switch {
 	case days <= 1:
-		minInstalls = 3 // Today: need at least 3 installs
+		minInstalls = 5 // Today: need at least 5 installs
 	case days <= 7:
-		minInstalls = 5 // 7 days: need at least 5 installs
+		minInstalls = 15 // 7 days: need at least 15 installs
 	case days <= 30:
-		minInstalls = 10 // 30 days: need at least 10 installs
+		minInstalls = 40 // 30 days: need at least 40 installs
 	case days <= 90:
-		minInstalls = 15 // 90 days: need at least 15 installs
+		minInstalls = 100 // 90 days: need at least 100 installs
 	default:
-		minInstalls = 20 // 1 year+: need at least 20 installs
+		minInstalls = 100 // 1 year+: need at least 100 installs
 	}
 	// Returns 16 items: 8 LXC + 8 VM balanced, LXC prioritized
 	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16, minInstalls)
@@ -2689,11 +2695,11 @@ func DashboardHTML() string {
             // Update threshold info based on active period
             const activeDays = parseInt(document.querySelector('.filter-btn.active')?.dataset.days || '1');
             let minInstalls = 10;
-            if (activeDays <= 1) minInstalls = 3;
-            else if (activeDays <= 7) minInstalls = 5;
-            else if (activeDays <= 30) minInstalls = 10;
-            else if (activeDays <= 90) minInstalls = 15;
-            else minInstalls = 20;
+            if (activeDays <= 1) minInstalls = 5;
+            else if (activeDays <= 7) minInstalls = 15;
+            else if (activeDays <= 30) minInstalls = 40;
+            else if (activeDays <= 90) minInstalls = 100;
+            else minInstalls = 100;
             
             document.getElementById('failedAppsThreshold').textContent = '(min. ' + minInstalls + ' installs required)';
             
