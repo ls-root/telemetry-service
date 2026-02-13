@@ -290,9 +290,23 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	// Error analysis
 	data.ErrorAnalysis = buildErrorAnalysis(errorApps, errorCounts, 15)
 
-	// Failed apps with failure rates (min 10 installs threshold)
+	// Failed apps with failure rates - dynamic threshold based on time period
+	// Shorter periods = lower threshold (less data available)
+	minInstalls := 10 // default
+	switch {
+	case days <= 1:
+		minInstalls = 3 // Today: need at least 3 installs
+	case days <= 7:
+		minInstalls = 5 // 7 days: need at least 5 installs
+	case days <= 30:
+		minInstalls = 10 // 30 days: need at least 10 installs
+	case days <= 90:
+		minInstalls = 15 // 90 days: need at least 15 installs
+	default:
+		minInstalls = 20 // 1 year+: need at least 20 installs
+	}
 	// Returns 16 items: 8 LXC + 8 VM balanced, LXC prioritized
-	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16)
+	data.FailedApps = buildFailedApps(appTypeCounts, appTypeFailures, 16, minInstalls)
 
 	// Daily stats for chart
 	data.DailyStats = buildDailyStats(dailySuccess, dailyFailed, days)
@@ -570,10 +584,9 @@ func buildErrorAnalysis(apps map[string]map[string]bool, counts map[string]int, 
 	return result
 }
 
-func buildFailedApps(total, failed map[string]int, n int) []AppFailure {
+func buildFailedApps(total, failed map[string]int, n int, minInstalls int) []AppFailure {
 	lxcApps := make([]AppFailure, 0)
 	vmApps := make([]AppFailure, 0)
-	minInstalls := 10 // Minimum installations to be considered (avoid noise from rare apps)
 
 	for key, failCount := range failed {
 		totalCount := total[key]
@@ -2376,7 +2389,7 @@ func DashboardHTML() string {
             <div class="section-header">
                 <div>
                     <h2>Apps with Highest Failure Rates</h2>
-                    <p>Applications that need attention.</p>
+                    <p>Applications that need attention <span id="failedAppsThreshold" style="color: var(--text-muted); font-size: 12px;"></span></p>
                 </div>
             </div>
             <div class="failed-apps-grid" id="failedAppsGrid">
@@ -2678,8 +2691,20 @@ func DashboardHTML() string {
         
         function updateFailedApps(apps) {
             const container = document.getElementById('failedAppsGrid');
+            
+            // Update threshold info based on active period
+            const activeDays = parseInt(document.querySelector('.filter-btn.active')?.dataset.days || '1');
+            let minInstalls = 10;
+            if (activeDays <= 1) minInstalls = 3;
+            else if (activeDays <= 7) minInstalls = 5;
+            else if (activeDays <= 30) minInstalls = 10;
+            else if (activeDays <= 90) minInstalls = 15;
+            else minInstalls = 20;
+            
+            document.getElementById('failedAppsThreshold').textContent = '(min. ' + minInstalls + ' installs required)';
+            
             if (!apps || apps.length === 0) {
-                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No failures recorded</div>';
+                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No apps with enough data (minimum ' + minInstalls + ' installations required)</div>';
                 return;
             }
             
