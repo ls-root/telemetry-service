@@ -1875,6 +1875,73 @@ func DashboardHTML() string {
             font-size: 14px;
         }
         
+        /* Auto-Refresh Toggle */
+        .auto-refresh-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+        
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            transition: .3s;
+            border-radius: 24px;
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: var(--text-muted);
+            transition: .3s;
+            border-radius: 50%;
+        }
+        
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: rgba(34, 197, 94, 0.2);
+            border-color: var(--accent-green);
+        }
+        
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+            background-color: var(--accent-green);
+        }
+        
+        .auto-refresh-interval {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+        
+        .auto-refresh-interval.active {
+            color: var(--accent-green);
+        }
+        
         /* Detail Modal Styles */
         .modal-overlay {
             position: fixed;
@@ -2117,6 +2184,15 @@ func DashboardHTML() string {
                     <button class="filter-btn" data-days="90">90 Days</button>
                     <button class="filter-btn" data-days="365">1 Year</button>
                 </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="auto-refresh-toggle">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="autoRefreshToggle" onchange="toggleAutoRefresh()">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span>Auto-refresh</span>
+                <span class="auto-refresh-interval" id="refreshInterval">15s</span>
             </div>
             <div style="margin-left: auto; display: flex; gap: 8px;">
                 <button class="btn" onclick="refreshData()">
@@ -2426,6 +2502,11 @@ func DashboardHTML() string {
         let perPage = 25;
         let currentTheme = localStorage.getItem('theme') || 'dark';
         let currentSort = { field: 'created', dir: 'desc' };
+        
+        // Auto-refresh state
+        let autoRefreshEnabled = localStorage.getItem('autoRefresh') === 'true';
+        let autoRefreshInterval = 15000; // 15 seconds
+        let autoRefreshTimer = null;
         
         // Colorful palette for Top Applications chart
         const appBarColors = [
@@ -3197,8 +3278,7 @@ func DashboardHTML() string {
                 const data = await fetchData();
                 updateStats(data);
                 updateCharts(data);
-                updateTable(data.recent_records);
-                // Also refresh paginated Installation Log with current filters
+                // Refresh paginated Installation Log with current filters (NOT from cached recent_records)
                 currentPage = 1;
                 fetchPaginatedRecords();
             } catch (e) {
@@ -3228,8 +3308,64 @@ func DashboardHTML() string {
             });
         });
         
-        // Auto-refresh every 60 seconds
-        setInterval(refreshData, 60000);
+        // Auto-refresh functionality
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = document.getElementById('autoRefreshToggle').checked;
+            localStorage.setItem('autoRefresh', autoRefreshEnabled);
+            
+            const intervalDisplay = document.getElementById('refreshInterval');
+            
+            if (autoRefreshEnabled) {
+                intervalDisplay.classList.add('active');
+                startAutoRefresh();
+            } else {
+                intervalDisplay.classList.remove('active');
+                stopAutoRefresh();
+            }
+        }
+        
+        function startAutoRefresh() {
+            stopAutoRefresh(); // Clear any existing timer
+            
+            let countdown = autoRefreshInterval / 1000;
+            const intervalDisplay = document.getElementById('refreshInterval');
+            
+            // Update countdown display
+            const countdownTimer = setInterval(() => {
+                countdown--;
+                if (countdown <= 0) {
+                    countdown = autoRefreshInterval / 1000;
+                }
+                intervalDisplay.textContent = countdown + 's';
+            }, 1000);
+            
+            // Actual refresh
+            autoRefreshTimer = setInterval(() => {
+                refreshData();
+                countdown = autoRefreshInterval / 1000;
+            }, autoRefreshInterval);
+            
+            // Store countdown timer for cleanup
+            autoRefreshTimer.countdownTimer = countdownTimer;
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshTimer) {
+                clearInterval(autoRefreshTimer);
+                if (autoRefreshTimer.countdownTimer) {
+                    clearInterval(autoRefreshTimer.countdownTimer);
+                }
+                autoRefreshTimer = null;
+            }
+            document.getElementById('refreshInterval').textContent = '15s';
+        }
+        
+        // Initialize auto-refresh state on load
+        document.getElementById('autoRefreshToggle').checked = autoRefreshEnabled;
+        if (autoRefreshEnabled) {
+            document.getElementById('refreshInterval').classList.add('active');
+            startAutoRefresh();
+        }
     </script>
 </body>
 </html>`
