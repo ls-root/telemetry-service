@@ -176,8 +176,17 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	addonCounts := make(map[string]int)             // addon_name -> count
 	var totalDuration, durationCount int
 
-	for _, r := range records {
+	for i := range records {
+		r := &records[i]
 		data.TotalInstalls++
+
+		// Auto-reclassify: old records still have status="failed" for SIGINT/Ctrl+C
+		if r.Status == "failed" && (r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sigint") ||
+			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
+			strings.Contains(strings.ToLower(r.Error), "ctrl-c")) {
+			r.Status = "aborted"
+		}
 
 		switch r.Status {
 		case "success":

@@ -330,7 +330,15 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 		filters = append(filters, fmt.Sprintf("created >= '%s'", since))
 	}
 	if status != "" {
-		filters = append(filters, fmt.Sprintf("status='%s'", status))
+		if status == "aborted" {
+			// Include both native "aborted" and legacy "failed" records with SIGINT indicators
+			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=130 || error~'SIGINT' || error~'Ctrl+C' || error~'Ctrl-C')))")
+		} else if status == "failed" {
+			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
+			filters = append(filters, "(status='failed' && exit_code!=130 && !(error~'SIGINT') && !(error~'Ctrl+C') && !(error~'Ctrl-C'))")
+		} else {
+			filters = append(filters, fmt.Sprintf("status='%s'", status))
+		}
 	}
 	if app != "" {
 		filters = append(filters, fmt.Sprintf("nsapp~'%s'", app))
@@ -1055,6 +1063,16 @@ func main() {
 			return
 		}
 
+		// Auto-reclassify old records that have status=failed but are actually SIGINT aborts
+		for i := range records {
+			if records[i].Status == "failed" && (records[i].ExitCode == 130 ||
+				strings.Contains(strings.ToLower(records[i].Error), "sigint") ||
+				strings.Contains(strings.ToLower(records[i].Error), "ctrl+c") ||
+				strings.Contains(strings.ToLower(records[i].Error), "ctrl-c")) {
+				records[i].Status = "aborted"
+			}
+		}
+
 		response := map[string]interface{}{
 			"records":     records,
 			"page":        page,
@@ -1140,6 +1158,18 @@ func main() {
 			}
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
+		}
+
+		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C,
+		// detect and reclassify as "aborted" server-side.
+		if in.Status == "failed" && (in.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(in.Error), "sigint") ||
+			strings.Contains(strings.ToLower(in.Error), "ctrl+c") ||
+			strings.Contains(strings.ToLower(in.Error), "ctrl-c")) {
+			in.Status = "aborted"
+			if cfg.EnableReqLogging {
+				log.Printf("auto-reclassified as aborted: nsapp=%s exit_code=%d", in.NSAPP, in.ExitCode)
+			}
 		}
 
 		// Map input to PocketBase schema
