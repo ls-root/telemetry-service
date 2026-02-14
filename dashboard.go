@@ -3041,6 +3041,7 @@ func DashboardHTML() string {
                 renderTableRows(data.records || []);
             } catch (e) {
                 console.error('Pagination error:', e);
+                renderTableRows([]);
             }
         }
         
