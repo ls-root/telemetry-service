@@ -640,6 +640,7 @@ func sanitizeShort(s string, max int) string {
 }
 
 // sanitizeMultiLine allows newlines (for log output) but limits total length.
+// Also strips ANSI escape sequences and non-printable control characters.
 func sanitizeMultiLine(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -647,6 +648,29 @@ func sanitizeMultiLine(s string, max int) string {
 	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
+	// Strip ANSI escape sequences (e.g. color codes)
+	var cleaned strings.Builder
+	cleaned.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			// Skip ANSI CSI sequence: ESC [ ... <final byte>
+			i += 2
+			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x3f {
+				i++ // parameter bytes
+			}
+			if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+				i++ // final byte
+			}
+			continue
+		}
+		// Keep printable chars, newlines, and tabs; drop other control chars
+		if s[i] == '\n' || s[i] == '\t' || s[i] >= 0x20 {
+			cleaned.WriteByte(s[i])
+		}
+		i++
+	}
+	s = cleaned.String()
 	if len(s) > max {
 		s = s[:max]
 	}
@@ -786,7 +810,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 1024),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 8192),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
