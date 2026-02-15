@@ -124,11 +124,11 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	if days > 0 {
 		var since string
 		if days == 1 {
-			// "Today" = since midnight today (not yesterday)
-			since = time.Now().Format("2006-01-02") + " 00:00:00"
+			// "Today" = since midnight today UTC (not yesterday)
+			since = time.Now().UTC().Format("2006-01-02") + " 00:00:00.000Z"
 		} else {
-			// N days = today + (N-1) previous days
-			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+			// N days = today + (N-1) previous days in UTC
+			since = time.Now().UTC().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00.000Z"
 		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
