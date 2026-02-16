@@ -170,6 +170,171 @@ type ErrorTimelinePoint struct {
 	Aborted int    `json:"aborted"`
 }
 
+// ========================================================
+// Script Analysis Data Types
+// ========================================================
+
+type ScriptAnalysisData struct {
+	TotalScripts   int              `json:"total_scripts"`
+	TotalInstalls  int              `json:"total_installs"`
+	TopScripts     []ScriptStat     `json:"top_scripts"`
+	RecentScripts  []RecentScript   `json:"recent_scripts"`
+}
+
+type ScriptStat struct {
+	App          string  `json:"app"`
+	Type         string  `json:"type"`
+	Total        int     `json:"total"`
+	Success      int     `json:"success"`
+	Failed       int     `json:"failed"`
+	Aborted      int     `json:"aborted"`
+	Installing   int     `json:"installing"`
+	SuccessRate  float64 `json:"success_rate"`
+}
+
+type RecentScript struct {
+	App       string `json:"app"`
+	Type      string `json:"type"`
+	Status    string `json:"status"`
+	ExitCode  int    `json:"exit_code"`
+	OsType    string `json:"os_type"`
+	OsVersion string `json:"os_version"`
+	PveVer    string `json:"pve_version"`
+	Created   string `json:"created"`
+	Method    string `json:"method"`
+}
+
+// FetchScriptAnalysisData retrieves script usage statistics
+func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSource string) (*ScriptAnalysisData, error) {
+	if err := p.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	var filterParts []string
+	if days > 0 {
+		var since string
+		if days == 1 {
+			since = time.Now().Format("2006-01-02") + " 00:00:00"
+		} else {
+			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+		}
+		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
+	}
+	if repoSource != "" {
+		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+	}
+
+	var filter string
+	if len(filterParts) > 0 {
+		filter = url.QueryEscape(strings.Join(filterParts, " && "))
+	}
+
+	result, err := p.fetchRecords(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	records := result.Records
+
+	data := &ScriptAnalysisData{
+		TotalInstalls: len(records),
+	}
+
+	type accumulator struct {
+		app        string
+		typ        string
+		total      int
+		success    int
+		failed     int
+		aborted    int
+		installing int
+	}
+
+	appStats := make(map[string]*accumulator)
+	uniqueApps := make(map[string]bool)
+	var recentAll []RecentScript
+
+	for i := range records {
+		r := &records[i]
+
+		// Auto-reclassify SIGINT as aborted
+		if r.Status == "failed" && (r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sigint") ||
+			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
+			strings.Contains(strings.ToLower(r.Error), "aborted by user")) {
+			r.Status = "aborted"
+		}
+		// Reclassify failed+exit_code=0
+		if r.Status == "failed" && r.ExitCode == 0 && (r.Error == "" || strings.ToLower(r.Error) == "success") {
+			r.Status = "success"
+		}
+
+		key := r.NSAPP + "|" + r.Type
+		uniqueApps[r.NSAPP] = true
+		if appStats[key] == nil {
+			appStats[key] = &accumulator{app: r.NSAPP, typ: r.Type}
+		}
+		a := appStats[key]
+		a.total++
+		switch r.Status {
+		case "success":
+			a.success++
+		case "failed":
+			a.failed++
+		case "aborted":
+			a.aborted++
+		case "installing":
+			a.installing++
+		}
+
+		// Collect recent records (max 200)
+		if len(recentAll) < 200 {
+			recentAll = append(recentAll, RecentScript{
+				App:       r.NSAPP,
+				Type:      r.Type,
+				Status:    r.Status,
+				ExitCode:  r.ExitCode,
+				OsType:    r.OsType,
+				OsVersion: r.OsVersion,
+				PveVer:    r.PveVer,
+				Created:   r.Created,
+				Method:    r.Method,
+			})
+		}
+	}
+
+	data.TotalScripts = len(uniqueApps)
+
+	// Build sorted script stats (by total desc)
+	for _, a := range appStats {
+		rate := float64(0)
+		completed := a.success + a.failed + a.aborted
+		if completed > 0 {
+			rate = float64(a.success) / float64(completed) * 100
+		}
+		data.TopScripts = append(data.TopScripts, ScriptStat{
+			App:         a.app,
+			Type:        a.typ,
+			Total:       a.total,
+			Success:     a.success,
+			Failed:      a.failed,
+			Aborted:     a.aborted,
+			Installing:  a.installing,
+			SuccessRate: rate,
+		})
+	}
+	// Sort by total desc
+	for i := 0; i < len(data.TopScripts); i++ {
+		for j := i + 1; j < len(data.TopScripts); j++ {
+			if data.TopScripts[j].Total > data.TopScripts[i].Total {
+				data.TopScripts[i], data.TopScripts[j] = data.TopScripts[j], data.TopScripts[i]
+			}
+		}
+	}
+
+	data.RecentScripts = recentAll
+	return data, nil
+}
+
 // FetchErrorAnalysisData retrieves detailed error analysis from PocketBase
 func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource string) (*ErrorAnalysisData, error) {
 	if err := p.ensureAuth(ctx); err != nil {
@@ -4283,6 +4448,7 @@ func ErrorAnalysisHTML() string {
         <div class="nav-links">
             <a href="/" class="nav-link">📊 Dashboard</a>
             <a href="/error-analysis" class="nav-link active">🔍 Error Analysis</a>
+            <a href="/script-analysis" class="nav-link">📜 Scripts</a>
         </div>
     </nav>
 
@@ -4885,6 +5051,345 @@ func ErrorAnalysisHTML() string {
         });
 
         // Initial load
+        refreshData();
+    </script>
+</body>
+</html>`
+}
+
+// ScriptAnalysisHTML returns the Script Analysis page
+func ScriptAnalysisHTML() string {
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Script Analysis - Proxmox VE Helper-Scripts</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322d3ee' stroke-width='2.5'><polyline points='4 17 10 11 4 5'/><line x1='12' y1='19' x2='20' y2='19'/></svg>">
+    <style>
+        :root { --bg-primary: #0d1117; --bg-secondary: #161b22; --bg-card: #1c2333; --text-primary: #e6edf3; --text-secondary: #b0b8c4; --text-muted: #6b7685; --border-color: #2d3748; --accent-green: #22c55e; --accent-red: #ef4444; --accent-blue: #3b82f6; --accent-cyan: #22d3ee; --accent-orange: #f97316; --accent-yellow: #eab308; --accent-purple: #a855f7; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-primary); color: var(--text-primary); min-height: 100vh; }
+        .navbar { background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); padding: 0 24px; height: 64px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+        .navbar-brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--text-primary); font-weight: 600; }
+        .navbar-brand svg { color: var(--accent-cyan); }
+        .nav-links { display: flex; gap: 8px; }
+        .nav-link { color: var(--text-secondary); text-decoration: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; transition: all 0.2s; }
+        .nav-link:hover { background: var(--bg-card); color: var(--text-primary); }
+        .nav-link.active { background: var(--accent-cyan); color: var(--bg-primary); font-weight: 600; }
+        .main-content { max-width: 1400px; margin: 0 auto; padding: 24px; }
+        .page-header { margin-bottom: 24px; }
+        .page-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+        .page-header p { color: var(--text-muted); font-size: 14px; }
+        .filters-bar { display: flex; align-items: center; gap: 16px; padding: 12px 20px; flex-wrap: wrap; }
+        .filter-group { display: flex; align-items: center; gap: 8px; }
+        .filter-group label { font-size: 13px; color: var(--text-muted); font-weight: 500; }
+        .filter-divider { width: 1px; height: 24px; background: var(--border-color); }
+        .quickfilter { display: flex; gap: 4px; }
+        .filter-btn, .source-btn { background: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .filter-btn:hover, .source-btn:hover { border-color: var(--accent-cyan); color: var(--text-primary); }
+        .filter-btn.active, .source-btn.active { background: var(--accent-cyan); border-color: var(--accent-cyan); color: var(--bg-primary); font-weight: 600; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
+        .stat-card .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .stat-card .value { font-size: 28px; font-weight: 700; }
+        .section-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+        .section-card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--border-color); color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; position: sticky; top: 0; background: var(--bg-card); }
+        td { padding: 10px 12px; border-bottom: 1px solid var(--border-color); }
+        tr:hover { background: rgba(34,211,238,0.03); }
+        .type-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .type-badge.lxc { background: rgba(34,211,238,0.15); color: var(--accent-cyan); }
+        .type-badge.vm { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .status-badge { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .status-badge.success { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .status-badge.failed { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .status-badge.aborted { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .status-badge.installing { background: rgba(234,179,8,0.15); color: var(--accent-yellow); }
+        .success-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--border-color); min-width: 80px; }
+        .success-bar .seg-success { background: var(--accent-green); }
+        .success-bar .seg-failed { background: var(--accent-red); }
+        .success-bar .seg-aborted { background: var(--accent-purple); }
+        .success-bar .seg-installing { background: var(--accent-yellow); }
+        .btn { background: var(--accent-cyan); color: var(--bg-primary); border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity 0.2s; }
+        .btn:hover { opacity: 0.85; }
+        .btn-sm { padding: 4px 10px; font-size: 11px; }
+        .search-input { background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 12px; border-radius: 6px; font-size: 13px; width: 250px; }
+        .search-input:focus { outline: none; border-color: var(--accent-cyan); }
+        .table-wrap { max-height: 600px; overflow-y: auto; }
+        .table-wrap::-webkit-scrollbar { width: 6px; }
+        .table-wrap::-webkit-scrollbar-track { background: var(--bg-primary); }
+        .table-wrap::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+        .exit-code { font-family: 'Consolas', monospace; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+        .exit-code.ok { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .exit-code.err { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .section-card { animation: fadeIn 0.3s ease; }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            Proxmox VE Helper-Scripts
+        </a>
+        <div class="nav-links">
+            <a href="/" class="nav-link">📊 Dashboard</a>
+            <a href="/error-analysis" class="nav-link">🔍 Error Analysis</a>
+            <a href="/script-analysis" class="nav-link active">📜 Script Analysis</a>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="page-header">
+            <h1>📜 Script Analysis</h1>
+            <p>Script usage statistics, popularity rankings, and recent activity.</p>
+        </div>
+
+        <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
+            <div class="filter-group">
+                <label>Source:</label>
+                <div class="quickfilter">
+                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
+                    <button class="source-btn" data-repo="all">All</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Period:</label>
+                <div class="quickfilter">
+                    <button class="filter-btn" data-days="7">7 Days</button>
+                    <button class="filter-btn active" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="0">All Time</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="label">Total Installs</div>
+                <div class="value" id="totalInstalls" style="color:var(--accent-cyan);">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Unique Scripts</div>
+                <div class="value" id="uniqueScripts" style="color:var(--accent-blue);">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Avg Installs / Script</div>
+                <div class="value" id="avgInstalls" style="color:var(--accent-green);">-</div>
+            </div>
+        </div>
+
+        <!-- Top Scripts -->
+        <div class="section-card">
+            <h2>
+                🏆 Most Used Scripts
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchTop" placeholder="Search scripts..." oninput="renderTopTable()">
+                    <button class="btn btn-sm" id="expandTopBtn" onclick="toggleExpand('top')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="topTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Success</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Installing</th>
+                            <th>Success Rate</th>
+                            <th style="min-width:100px;">Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="topTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Scripts -->
+        <div class="section-card">
+            <h2>
+                🕐 Recent Activity
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="text" class="search-input" id="searchRecent" placeholder="Search..." oninput="renderRecentTable()">
+                    <button class="btn btn-sm" id="expandRecentBtn" onclick="toggleExpand('recent')">Show All</button>
+                </div>
+            </h2>
+            <div class="table-wrap" id="recentTableWrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Script</th>
+                            <th>Type</th>
+                            <th>Status</th>
+                            <th>Exit Code</th>
+                            <th>OS</th>
+                            <th>PVE</th>
+                            <th>Method</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+        let expandTop = false;
+        let expandRecent = false;
+        const LIMIT = 10;
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+        }
+
+        async function fetchData() {
+            const days = document.querySelector('.filter-btn.active')?.dataset.days || '30';
+            const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+            try {
+                const resp = await fetch('/api/scripts?days=' + days + '&repo=' + repo);
+                if (!resp.ok) throw new Error('Fetch failed');
+                return await resp.json();
+            } catch(e) {
+                console.error('Fetch error:', e);
+                return null;
+            }
+        }
+
+        function updateStats(data) {
+            document.getElementById('totalInstalls').textContent = (data.total_installs || 0).toLocaleString();
+            document.getElementById('uniqueScripts').textContent = (data.total_scripts || 0).toLocaleString();
+            const avg = data.total_scripts > 0 ? (data.total_installs / data.total_scripts).toFixed(1) : '0';
+            document.getElementById('avgInstalls').textContent = avg;
+        }
+
+        function renderTopTable() {
+            const tbody = document.getElementById('topTableBody');
+            if (!currentData || !currentData.top_scripts) {
+                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+                return;
+            }
+            const search = (document.getElementById('searchTop').value || '').toLowerCase();
+            let scripts = currentData.top_scripts;
+            if (search) {
+                scripts = scripts.filter(s => s.app.toLowerCase().includes(search) || (s.type||'').toLowerCase().includes(search));
+            }
+            const limit = expandTop ? scripts.length : Math.min(LIMIT, scripts.length);
+            const shown = scripts.slice(0, limit);
+
+            tbody.innerHTML = shown.map((s, idx) => {
+                const typeClass = (s.type || '').toLowerCase();
+                const rateColor = s.success_rate >= 90 ? 'var(--accent-green)' : s.success_rate >= 70 ? 'var(--accent-yellow)' : 'var(--accent-red)';
+                const total = s.success + s.failed + s.aborted + s.installing;
+                const pctSuccess = total > 0 ? (s.success / total * 100) : 0;
+                const pctFailed = total > 0 ? (s.failed / total * 100) : 0;
+                const pctAborted = total > 0 ? (s.aborted / total * 100) : 0;
+                const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
+                return '<tr>' +
+                    '<td style="color:var(--text-muted);font-weight:600;">' + (idx + 1) + '</td>' +
+                    '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
+                    '<td style="font-weight:600;">' + s.total.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-green);">' + s.success.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-red);">' + s.failed.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-purple);">' + s.aborted.toLocaleString() + '</td>' +
+                    '<td style="color:var(--accent-yellow);">' + s.installing.toLocaleString() + '</td>' +
+                    '<td style="color:' + rateColor + ';font-weight:600;">' + s.success_rate.toFixed(1) + '%</td>' +
+                    '<td><div class="success-bar">' +
+                        '<div class="seg-success" style="width:' + pctSuccess + '%"></div>' +
+                        '<div class="seg-failed" style="width:' + pctFailed + '%"></div>' +
+                        '<div class="seg-aborted" style="width:' + pctAborted + '%"></div>' +
+                        '<div class="seg-installing" style="width:' + pctInstalling + '%"></div>' +
+                    '</div></td>' +
+                '</tr>';
+            }).join('');
+
+            document.getElementById('expandTopBtn').textContent = expandTop ? 'Show Top 10' : 'Show All (' + scripts.length + ')';
+        }
+
+        function renderRecentTable() {
+            const tbody = document.getElementById('recentTableBody');
+            if (!currentData || !currentData.recent_scripts) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+                return;
+            }
+            const search = (document.getElementById('searchRecent').value || '').toLowerCase();
+            let scripts = currentData.recent_scripts;
+            if (search) {
+                scripts = scripts.filter(s => s.app.toLowerCase().includes(search) || (s.status||'').toLowerCase().includes(search) || (s.type||'').toLowerCase().includes(search));
+            }
+            const limit = expandRecent ? scripts.length : Math.min(LIMIT, scripts.length);
+            const shown = scripts.slice(0, limit);
+
+            tbody.innerHTML = shown.map(s => {
+                const typeClass = (s.type || '').toLowerCase();
+                const statusClass = s.status || 'unknown';
+                const codeClass = s.exit_code === 0 ? 'ok' : 'err';
+                const os = s.os_type ? s.os_type + (s.os_version ? ' ' + s.os_version : '') : '-';
+                return '<tr>' +
+                    '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + (s.type || '-').toUpperCase() + '</span></td>' +
+                    '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(s.status) + '</span></td>' +
+                    '<td><span class="exit-code ' + codeClass + '">' + s.exit_code + '</span></td>' +
+                    '<td>' + escapeHtml(os) + '</td>' +
+                    '<td>' + escapeHtml(s.pve_version || '-') + '</td>' +
+                    '<td>' + escapeHtml(s.method || '-') + '</td>' +
+                    '<td style="white-space:nowrap;">' + formatTimestamp(s.created) + '</td>' +
+                '</tr>';
+            }).join('');
+
+            document.getElementById('expandRecentBtn').textContent = expandRecent ? 'Show Last 10' : 'Show All (' + scripts.length + ')';
+        }
+
+        function toggleExpand(which) {
+            if (which === 'top') {
+                expandTop = !expandTop;
+                renderTopTable();
+            } else {
+                expandRecent = !expandRecent;
+                renderRecentTable();
+            }
+        }
+
+        async function refreshData() {
+            const data = await fetchData();
+            if (!data) return;
+            currentData = data;
+            updateStats(data);
+            renderTopTable();
+            renderRecentTable();
+        }
+
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
+        document.querySelectorAll('.source-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
+
         refreshData();
     </script>
 </body>

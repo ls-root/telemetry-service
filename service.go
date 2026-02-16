@@ -1241,6 +1241,87 @@ func main() {
 		_, _ = w.Write([]byte(ErrorAnalysisHTML()))
 	})
 
+	// Script Analysis page
+	mux.HandleFunc("/script-analysis", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		_, _ = w.Write([]byte(ScriptAnalysisHTML()))
+	})
+
+	// Script Analysis API
+	mux.HandleFunc("/api/scripts", func(w http.ResponseWriter, r *http.Request) {
+		days := 30
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 0 {
+				days = 1
+			}
+			if days > 365 {
+				days = 365
+			}
+		}
+
+		repoSource := r.URL.Query().Get("repo")
+		if repoSource == "" {
+			repoSource = "ProxmoxVE"
+		}
+		if repoSource == "all" {
+			repoSource = ""
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+
+		cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
+		var data *ScriptAnalysisData
+		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "HIT")
+			if cache.IsStale(ctx, cacheKey) {
+				w.Header().Set("X-Cache", "STALE")
+				if cache.TryStartRefresh(cacheKey) {
+					go func() {
+						defer cache.FinishRefresh(cacheKey)
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+						defer cancel()
+						freshData, err := pb.FetchScriptAnalysisData(refreshCtx, days, repoSource)
+						if err != nil {
+							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
+							return
+						}
+						_ = cache.Set(context.Background(), cacheKey, freshData, cfg.CacheTTL)
+					}()
+				}
+			}
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+
+		data, err := pb.FetchScriptAnalysisData(ctx, days, repoSource)
+		if err != nil {
+			log.Printf("script analysis fetch failed: %v", err)
+			http.Error(w, "failed to fetch script data", http.StatusInternalServerError)
+			return
+		}
+
+		if cfg.CacheEnabled {
+			cacheTTL := cfg.CacheTTL
+			switch {
+			case days <= 7:
+				cacheTTL = 2 * time.Minute
+			case days <= 30:
+				cacheTTL = 5 * time.Minute
+			default:
+				cacheTTL = 15 * time.Minute
+			}
+			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Cache", "MISS")
+		json.NewEncoder(w).Encode(data)
+	})
+
 	// Error Analysis API - detailed error data
 	mux.HandleFunc("/api/errors", func(w http.ResponseWriter, r *http.Request) {
 		days := 7
