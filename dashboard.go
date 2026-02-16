@@ -108,6 +108,378 @@ type AddonCount struct {
 	Count int    `json:"count"`
 }
 
+// ========================================================
+// Error Analysis Data Types
+// ========================================================
+
+// ErrorAnalysisData holds comprehensive error analysis
+type ErrorAnalysisData struct {
+	TotalErrors       int                  `json:"total_errors"`
+	TotalInstalls     int                  `json:"total_installs"`
+	OverallFailRate   float64              `json:"overall_fail_rate"`
+	ExitCodeStats     []ExitCodeStat       `json:"exit_code_stats"`
+	CategoryStats     []CategoryStat       `json:"category_stats"`
+	AppErrors         []AppErrorDetail     `json:"app_errors"`
+	RecentErrors      []ErrorRecord        `json:"recent_errors"`
+	StuckInstalling   int                  `json:"stuck_installing"`
+	ErrorTimeline     []ErrorTimelinePoint `json:"error_timeline"`
+}
+
+type ExitCodeStat struct {
+	ExitCode    int    `json:"exit_code"`
+	Count       int    `json:"count"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	Percentage  float64 `json:"percentage"`
+}
+
+type CategoryStat struct {
+	Category    string  `json:"category"`
+	Count       int     `json:"count"`
+	Percentage  float64 `json:"percentage"`
+	TopApps     string  `json:"top_apps"`
+}
+
+type AppErrorDetail struct {
+	App          string  `json:"app"`
+	Type         string  `json:"type"`
+	TotalCount   int     `json:"total_count"`
+	FailedCount  int     `json:"failed_count"`
+	AbortedCount int     `json:"aborted_count"`
+	FailureRate  float64 `json:"failure_rate"`
+	TopExitCode  int     `json:"top_exit_code"`
+	TopError     string  `json:"top_error"`
+	TopCategory  string  `json:"top_category"`
+}
+
+type ErrorRecord struct {
+	NSAPP         string `json:"nsapp"`
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	ExitCode      int    `json:"exit_code"`
+	Error         string `json:"error"`
+	ErrorCategory string `json:"error_category"`
+	OsType        string `json:"os_type"`
+	OsVersion     string `json:"os_version"`
+	Created       string `json:"created"`
+}
+
+type ErrorTimelinePoint struct {
+	Date    string `json:"date"`
+	Failed  int    `json:"failed"`
+	Aborted int    `json:"aborted"`
+}
+
+// FetchErrorAnalysisData retrieves detailed error analysis from PocketBase
+func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSource string) (*ErrorAnalysisData, error) {
+	if err := p.ensureAuth(ctx); err != nil {
+		return nil, err
+	}
+
+	// Build filter
+	var filterParts []string
+	if days > 0 {
+		var since string
+		if days == 1 {
+			since = time.Now().Format("2006-01-02") + " 00:00:00"
+		} else {
+			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
+		}
+		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
+	}
+	if repoSource != "" {
+		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+	}
+
+	var filter string
+	if len(filterParts) > 0 {
+		filter = url.QueryEscape(strings.Join(filterParts, " && "))
+	}
+
+	// Fetch all records
+	result, err := p.fetchRecords(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	records := result.Records
+
+	data := &ErrorAnalysisData{}
+	data.TotalInstalls = len(records)
+
+	// Analysis maps
+	exitCodeCounts := make(map[int]int)
+	categoryCounts := make(map[string]int)
+	categoryApps := make(map[string]map[string]bool)
+	appStats := make(map[string]*appStatAccum)
+	dailyFailed := make(map[string]int)
+	dailyAborted := make(map[string]int)
+	var recentErrors []ErrorRecord
+	stuckCount := 0
+
+	for i := range records {
+		r := &records[i]
+
+		// Auto-reclassify (same logic as dashboard)
+		if r.Status == "failed" && (r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sigint") ||
+			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
+			strings.Contains(strings.ToLower(r.Error), "ctrl-c") ||
+			strings.Contains(strings.ToLower(r.Error), "aborted by user") ||
+			strings.Contains(strings.ToLower(r.Error), "no changes have been made")) {
+			r.Status = "aborted"
+		}
+
+		if r.Status == "installing" {
+			stuckCount++
+			continue
+		}
+
+		if r.Status != "failed" && r.Status != "aborted" {
+			// Track total for app stats
+			key := r.NSAPP + "|" + r.Type
+			if appStats[key] == nil {
+				appStats[key] = &appStatAccum{app: r.NSAPP, typ: r.Type}
+			}
+			appStats[key].total++
+			continue
+		}
+
+		// This is a failed or aborted record
+		data.TotalErrors++
+
+		// Exit code stats
+		if r.Status == "failed" {
+			exitCodeCounts[r.ExitCode]++
+		}
+
+		// Category stats
+		cat := r.ErrorCategory
+		if cat == "" {
+			cat = "uncategorized"
+		}
+		categoryCounts[cat]++
+		if categoryApps[cat] == nil {
+			categoryApps[cat] = make(map[string]bool)
+		}
+		if r.NSAPP != "" {
+			categoryApps[cat][r.NSAPP] = true
+		}
+
+		// App stats
+		key := r.NSAPP + "|" + r.Type
+		if appStats[key] == nil {
+			appStats[key] = &appStatAccum{app: r.NSAPP, typ: r.Type}
+		}
+		appStats[key].total++
+		if r.Status == "failed" {
+			appStats[key].failed++
+		} else {
+			appStats[key].aborted++
+		}
+		// Track top error per app
+		if r.ExitCode != 0 && (appStats[key].topExitCodeCount == 0 || appStats[key].topExitCodeCount < exitCodeCounts[r.ExitCode]) {
+			appStats[key].topExitCode = r.ExitCode
+			appStats[key].topExitCodeCount = exitCodeCounts[r.ExitCode]
+		}
+		if r.Error != "" && (appStats[key].topError == "" || len(r.Error) > len(appStats[key].topError)) {
+			appStats[key].topError = r.Error
+			if len(appStats[key].topError) > 150 {
+				appStats[key].topError = appStats[key].topError[:150] + "..."
+			}
+		}
+		if cat != "uncategorized" && appStats[key].topCategory == "" {
+			appStats[key].topCategory = cat
+		}
+
+		// Daily timeline
+		if r.Created != "" {
+			date := r.Created[:10]
+			if r.Status == "failed" {
+				dailyFailed[date]++
+			} else {
+				dailyAborted[date]++
+			}
+		}
+
+		// Collect recent errors (up to 100)
+		if len(recentErrors) < 100 {
+			recentErrors = append(recentErrors, ErrorRecord{
+				NSAPP:         r.NSAPP,
+				Type:          r.Type,
+				Status:        r.Status,
+				ExitCode:      r.ExitCode,
+				Error:         r.Error,
+				ErrorCategory: r.ErrorCategory,
+				OsType:        r.OsType,
+				OsVersion:     r.OsVersion,
+				Created:       r.Created,
+			})
+		}
+	}
+
+	data.StuckInstalling = stuckCount
+
+	// Overall fail rate
+	if data.TotalInstalls > 0 {
+		data.OverallFailRate = float64(data.TotalErrors) / float64(data.TotalInstalls) * 100
+	}
+
+	// Build exit code stats
+	for code, count := range exitCodeCounts {
+		desc := "Unknown"
+		cat := "unknown"
+		// Use the exit code descriptions and categories from service.go
+		switch code {
+		case 0:
+			desc = "Success"
+		case 1:
+			desc = "General error"
+			cat = "unknown"
+		case 2:
+			desc = "Misuse of shell builtins"
+			cat = "unknown"
+		case 100:
+			desc = "APT: Package manager error (broken packages / dependency problems)"
+			cat = "apt"
+		case 126:
+			desc = "Command cannot execute (permission problem)"
+			cat = "permission"
+		case 127:
+			desc = "Command not found"
+			cat = "command_not_found"
+		case 130:
+			desc = "Script terminated by Ctrl+C (SIGINT)"
+			cat = "user_aborted"
+		case 137:
+			desc = "Process killed (SIGKILL) - likely OOM"
+			cat = "resource"
+		case 139:
+			desc = "Segmentation fault (SIGSEGV)"
+			cat = "unknown"
+		case 143:
+			desc = "Process terminated (SIGTERM)"
+			cat = "signal"
+		default:
+			if code > 128 && code < 192 {
+				desc = fmt.Sprintf("Killed by signal %d", code-128)
+				cat = "signal"
+			}
+		}
+		pct := float64(count) / float64(data.TotalErrors) * 100
+		data.ExitCodeStats = append(data.ExitCodeStats, ExitCodeStat{
+			ExitCode:    code,
+			Count:       count,
+			Description: desc,
+			Category:    cat,
+			Percentage:  pct,
+		})
+	}
+	// Sort by count desc
+	sortExitCodeStats(data.ExitCodeStats)
+
+	// Build category stats
+	for cat, count := range categoryCounts {
+		apps := categoryApps[cat]
+		appList := make([]string, 0, len(apps))
+		for a := range apps {
+			appList = append(appList, a)
+		}
+		appsStr := strings.Join(appList, ", ")
+		if len(appsStr) > 100 {
+			appsStr = appsStr[:97] + "..."
+		}
+
+		pct := float64(count) / float64(data.TotalErrors) * 100
+		data.CategoryStats = append(data.CategoryStats, CategoryStat{
+			Category:   cat,
+			Count:      count,
+			Percentage: pct,
+			TopApps:    appsStr,
+		})
+	}
+	// Sort by count desc
+	sortCategoryStats(data.CategoryStats)
+
+	// Build app error details (apps with at least 1 error, sorted by failure count)
+	for _, s := range appStats {
+		if s.failed+s.aborted == 0 {
+			continue
+		}
+		failRate := float64(s.failed) / float64(s.total) * 100
+		data.AppErrors = append(data.AppErrors, AppErrorDetail{
+			App:          s.app,
+			Type:         s.typ,
+			TotalCount:   s.total,
+			FailedCount:  s.failed,
+			AbortedCount: s.aborted,
+			FailureRate:  failRate,
+			TopExitCode:  s.topExitCode,
+			TopError:     s.topError,
+			TopCategory:  s.topCategory,
+		})
+	}
+	sortAppErrors(data.AppErrors)
+	if len(data.AppErrors) > 50 {
+		data.AppErrors = data.AppErrors[:50]
+	}
+
+	// Error timeline
+	for i := days - 1; i >= 0; i-- {
+		date := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		data.ErrorTimeline = append(data.ErrorTimeline, ErrorTimelinePoint{
+			Date:    date,
+			Failed:  dailyFailed[date],
+			Aborted: dailyAborted[date],
+		})
+	}
+
+	data.RecentErrors = recentErrors
+
+	return data, nil
+}
+
+type appStatAccum struct {
+	app             string
+	typ             string
+	total           int
+	failed          int
+	aborted         int
+	topExitCode     int
+	topExitCodeCount int
+	topError        string
+	topCategory     string
+}
+
+func sortExitCodeStats(s []ExitCodeStat) {
+	for i := 0; i < len(s)-1; i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[j].Count > s[i].Count {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
+}
+
+func sortCategoryStats(s []CategoryStat) {
+	for i := 0; i < len(s)-1; i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[j].Count > s[i].Count {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
+}
+
+func sortAppErrors(s []AppErrorDetail) {
+	for i := 0; i < len(s)-1; i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[j].FailedCount > s[i].FailedCount {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
+}
+
 // FetchDashboardData retrieves aggregated data from PocketBase
 // repoSource filters by repo_source field ("ProxmoxVE", "ProxmoxVED", "external", or "" for all)
 func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource string) (*DashboardData, error) {
@@ -124,11 +496,11 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 	if days > 0 {
 		var since string
 		if days == 1 {
-			// "Today" = since midnight today UTC (not yesterday)
-			since = time.Now().UTC().Format("2006-01-02") + " 00:00:00.000Z"
+			// "Today" = since midnight today (not yesterday)
+			since = time.Now().Format("2006-01-02") + " 00:00:00"
 		} else {
-			// N days = today + (N-1) previous days in UTC
-			since = time.Now().UTC().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00.000Z"
+			// N days = today + (N-1) previous days
+			since = time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02") + " 00:00:00"
 		}
 		filterParts = append(filterParts, fmt.Sprintf("created >= '%s'", since))
 	}
@@ -522,25 +894,11 @@ func normalizeError(err string) string {
 		return "unknown"
 	}
 
-	// Handle structured error format: "exit_code=N | description\n---\n<log lines>"
-	// Extract the header line for grouping, ignore the log lines
-	if strings.HasPrefix(err, "exit_code=") {
-		// Extract just the description part from "exit_code=N | description"
-		headerEnd := strings.Index(err, "\n")
-		header := err
-		if headerEnd > 0 {
-			header = err[:headerEnd]
-		}
-		// Extract description after "| "
-		if pipeIdx := strings.Index(header, "| "); pipeIdx > 0 {
-			return strings.TrimSpace(header[pipeIdx+2:])
-		}
-		return header
-	}
-
-	// Legacy format: normalize common patterns
+	// Normalize common patterns
 	err = strings.ToLower(err)
 
+	// Remove specific numbers, IPs, paths that vary
+	// Keep it simple for now - just truncate and normalize
 	if len(err) > 60 {
 		err = err[:60]
 	}
@@ -2200,6 +2558,7 @@ func DashboardHTML() string {
             <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
                 <span id="themeIcon">🌙</span>
             </button>
+            <a href="/error-analysis" class="nav-icon" title="Error Analysis" style="font-size:14px;font-weight:500;color:var(--text-secondary);text-decoration:none;padding:6px 12px;border-radius:8px;border:1px solid var(--border-color);">🔍 Errors</a>
         </div>
     </nav>
     
@@ -2439,22 +2798,7 @@ func DashboardHTML() string {
                     <h2>Installation Log</h2>
                     <p>Detailed records of all container creation attempts.</p>
                 </div>
-                <div class="section-actions" style="display: flex; align-items: center; gap: 16px;">
-                    <div class="auto-refresh-toggle">
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="logAutoRefreshToggle" onchange="toggleLogAutoRefresh()">
-                            <span class="toggle-slider"></span>
-                        </label>
-                        <span>Auto-refresh</span>
-                        <span class="auto-refresh-interval" id="logRefreshInterval">15s</span>
-                    </div>
-                    <button class="btn" onclick="fetchPaginatedRecords()">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
-                            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
-                        </svg>
-                        Refresh
-                    </button>
+                <div class="section-actions">
                     <button class="btn" onclick="exportCSV()">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
@@ -2570,11 +2914,6 @@ func DashboardHTML() string {
         let autoRefreshEnabled = localStorage.getItem('autoRefresh') === 'true';
         let autoRefreshInterval = 15000; // 15 seconds
         let autoRefreshTimer = null;
-        
-        // Log auto-refresh state (separate from main dashboard)
-        let logAutoRefreshEnabled = localStorage.getItem('logAutoRefresh') === 'true';
-        let logAutoRefreshInterval = 15000; // 15 seconds
-        let logAutoRefreshTimer = null;
         
         // Colorful palette for Top Applications chart
         const appBarColors = [
@@ -3061,7 +3400,6 @@ func DashboardHTML() string {
                 renderTableRows(data.records || []);
             } catch (e) {
                 console.error('Pagination error:', e);
-                renderTableRows([]);
             }
         }
         
@@ -3448,71 +3786,730 @@ func DashboardHTML() string {
             document.getElementById('refreshInterval').textContent = '15s';
         }
         
-        // Log auto-refresh functionality (for Installation Log section)
-        function toggleLogAutoRefresh() {
-            logAutoRefreshEnabled = document.getElementById('logAutoRefreshToggle').checked;
-            localStorage.setItem('logAutoRefresh', logAutoRefreshEnabled);
-            
-            const intervalDisplay = document.getElementById('logRefreshInterval');
-            
-            if (logAutoRefreshEnabled) {
-                intervalDisplay.classList.add('active');
-                startLogAutoRefresh();
-            } else {
-                intervalDisplay.classList.remove('active');
-                stopLogAutoRefresh();
-            }
-        }
-        
-        function startLogAutoRefresh() {
-            stopLogAutoRefresh(); // Clear any existing timer
-            
-            let countdown = logAutoRefreshInterval / 1000;
-            const intervalDisplay = document.getElementById('logRefreshInterval');
-            
-            // Update countdown display
-            const countdownTimer = setInterval(() => {
-                countdown--;
-                if (countdown <= 0) {
-                    countdown = logAutoRefreshInterval / 1000;
-                }
-                intervalDisplay.textContent = countdown + 's';
-            }, 1000);
-            
-            // Actual refresh (only fetch paginated records, not full dashboard)
-            logAutoRefreshTimer = setInterval(() => {
-                fetchPaginatedRecords();
-                countdown = logAutoRefreshInterval / 1000;
-            }, logAutoRefreshInterval);
-            
-            // Store countdown timer for cleanup
-            logAutoRefreshTimer.countdownTimer = countdownTimer;
-        }
-        
-        function stopLogAutoRefresh() {
-            if (logAutoRefreshTimer) {
-                clearInterval(logAutoRefreshTimer);
-                if (logAutoRefreshTimer.countdownTimer) {
-                    clearInterval(logAutoRefreshTimer.countdownTimer);
-                }
-                logAutoRefreshTimer = null;
-            }
-            document.getElementById('logRefreshInterval').textContent = '15s';
-        }
-        
         // Initialize auto-refresh state on load
         document.getElementById('autoRefreshToggle').checked = autoRefreshEnabled;
         if (autoRefreshEnabled) {
             document.getElementById('refreshInterval').classList.add('active');
             startAutoRefresh();
         }
-        
-        // Initialize log auto-refresh state on load
-        document.getElementById('logAutoRefreshToggle').checked = logAutoRefreshEnabled;
-        if (logAutoRefreshEnabled) {
-            document.getElementById('logRefreshInterval').classList.add('active');
-            startLogAutoRefresh();
+    </script>
+</body>
+</html>`
+}
+
+// ErrorAnalysisHTML returns the dedicated error analysis page
+func ErrorAnalysisHTML() string {
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error Analysis - Proxmox VE Helper-Scripts</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e14;
+            --bg-secondary: #131920;
+            --bg-tertiary: #1a2029;
+            --bg-card: #151b23;
+            --border-color: #2d3748;
+            --text-primary: #e2e8f0;
+            --text-secondary: #8b949e;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #22d3ee;
+            --accent-green: #22c55e;
+            --accent-red: #ef4444;
+            --accent-yellow: #eab308;
+            --accent-orange: #f97316;
+            --accent-purple: #a855f7;
+            --accent-pink: #ec4899;
         }
+        [data-theme="light"] {
+            --bg-primary: #f8fafc; --bg-secondary: #ffffff; --bg-tertiary: #f1f5f9;
+            --bg-card: #ffffff; --border-color: #e2e8f0; --text-primary: #1e293b;
+            --text-secondary: #64748b; --text-muted: #94a3b8;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg-primary); color: var(--text-primary); min-height: 100vh; }
+        .navbar { background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); padding: 0 24px; height: 64px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+        .navbar-brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--text-primary); font-weight: 600; }
+        .navbar-brand svg { color: var(--accent-cyan); }
+        .nav-links { display: flex; gap: 8px; }
+        .nav-link { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--text-secondary); text-decoration: none; transition: all 0.2s; border: 1px solid transparent; }
+        .nav-link:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .nav-link.active { background: var(--accent-blue); color: #fff; border-color: var(--accent-blue); }
+        .main-content { padding: 24px 40px; max-width: 1920px; margin: 0 auto; }
+        .page-header { margin-bottom: 24px; }
+        .page-header h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+        .page-header p { color: var(--text-secondary); font-size: 15px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 24px; }
+        .stat-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
+        .stat-card .label { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+        .stat-card .value { font-size: 32px; font-weight: 700; }
+        .stat-card .sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+        .stat-card.red .value { color: var(--accent-red); }
+        .stat-card.yellow .value { color: var(--accent-yellow); }
+        .stat-card.orange .value { color: var(--accent-orange); }
+        .stat-card.purple .value { color: var(--accent-purple); }
+        .section-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px; overflow: hidden; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px; border-bottom: 1px solid var(--border-color); }
+        .section-header h2 { font-size: 18px; font-weight: 600; }
+        .section-header p { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+        .filters-bar { display: flex; align-items: center; gap: 16px; padding: 16px 24px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-color); flex-wrap: wrap; }
+        .filter-group { display: flex; align-items: center; gap: 8px; }
+        .filter-group label { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+        .filter-divider { width: 1px; height: 32px; background: var(--border-color); }
+        .quickfilter { display: flex; gap: 4px; background: var(--bg-secondary); padding: 4px; border-radius: 8px; border: 1px solid var(--border-color); }
+        .filter-btn { background: transparent; border: none; color: var(--text-secondary); padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+        .filter-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .filter-btn.active { background: var(--accent-blue); color: #fff; }
+        .source-btn { background: transparent; border: none; color: var(--text-secondary); padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+        .source-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .source-btn.active { background: var(--accent-green); color: #fff; }
+        .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; border: 1px solid var(--border-color); background: var(--bg-tertiary); color: var(--text-primary); }
+        .btn:hover { background: var(--bg-primary); border-color: var(--accent-blue); }
+        .btn-danger { background: var(--accent-red); border-color: var(--accent-red); color: #fff; }
+        .btn-danger:hover { background: #dc2626; }
+        .btn-primary { background: var(--accent-blue); border-color: var(--accent-blue); color: #fff; }
+        .btn-primary:hover { background: #2563eb; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px 16px; text-align: left; }
+        th { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; background: var(--bg-tertiary); border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+        td { font-size: 13px; border-bottom: 1px solid var(--border-color); }
+        tr:hover td { background: rgba(59,130,246,0.05); }
+        .status-badge { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; text-transform: capitalize; }
+        .status-badge.failed { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .status-badge.aborted { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .type-badge { display: inline-flex; padding: 2px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+        .type-badge.lxc { background: rgba(34,211,238,0.15); color: var(--accent-cyan); }
+        .type-badge.vm { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .exit-code { font-family: 'Consolas', monospace; font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 4px; }
+        .exit-code.err { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .exit-code.ok { background: rgba(34,197,94,0.15); color: var(--accent-green); }
+        .error-text { font-family: 'Consolas', monospace; font-size: 12px; color: var(--accent-red); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+        .error-text:hover { white-space: normal; word-break: break-word; }
+        .category-badge { display: inline-flex; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .category-badge.apt { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+        .category-badge.network { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+        .category-badge.permission { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+        .category-badge.command_not_found { background: rgba(168,85,247,0.15); color: var(--accent-purple); }
+        .category-badge.user_aborted { background: rgba(100,116,139,0.15); color: var(--text-muted); }
+        .category-badge.timeout { background: rgba(234,179,8,0.15); color: var(--accent-yellow); }
+        .category-badge.storage { background: rgba(236,72,153,0.15); color: var(--accent-pink); }
+        .category-badge.resource { background: rgba(249,115,22,0.15); color: var(--accent-orange); }
+        .category-badge.dependency { background: rgba(34,211,238,0.15); color: var(--accent-cyan); }
+        .category-badge.signal { background: rgba(234,179,8,0.15); color: var(--accent-yellow); }
+        .category-badge.config { background: rgba(132,204,22,0.15); color: #84cc16; }
+        .category-badge.unknown, .category-badge.uncategorized { background: rgba(100,116,139,0.15); color: var(--text-muted); }
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+        .chart-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
+        .chart-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-secondary); }
+        .chart-wrapper { height: 280px; }
+        .loading { display: flex; justify-content: center; align-items: center; padding: 60px; color: var(--text-secondary); }
+        .loading-spinner { width: 40px; height: 40px; border: 3px solid var(--border-color); border-top-color: var(--accent-blue); border-radius: 50%; animation: spin 1s linear infinite; margin-right: 12px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+        .progress-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; justify-content: center; align-items: center; z-index: 1000; opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; }
+        .modal-overlay.active { opacity: 1; visibility: visible; }
+        .modal-content { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; width: 90%; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 20px 24px; border-bottom: 1px solid var(--border-color); }
+        .modal-header h2 { font-size: 18px; font-weight: 600; }
+        .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+        .modal-close:hover { background: var(--bg-tertiary); }
+        .modal-body { padding: 24px; }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; font-weight: 500; }
+        .form-input { width: 100%; background: var(--bg-tertiary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px 14px; border-radius: 8px; font-size: 14px; outline: none; }
+        .form-input:focus { border-color: var(--accent-blue); }
+        textarea.form-input { min-height: 120px; resize: vertical; font-family: 'Consolas', monospace; font-size: 12px; }
+        .alert-box { padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }
+        .alert-box.success { background: rgba(34,197,94,0.15); color: var(--accent-green); border: 1px solid rgba(34,197,94,0.3); }
+        .alert-box.error { background: rgba(239,68,68,0.15); color: var(--accent-red); border: 1px solid rgba(239,68,68,0.3); }
+        .alert-box.warning { background: rgba(234,179,8,0.15); color: var(--accent-yellow); border: 1px solid rgba(234,179,8,0.3); }
+        .stuck-banner { background: rgba(234,179,8,0.1); border: 1px solid rgba(234,179,8,0.3); color: var(--accent-yellow); padding: 16px 24px; border-radius: 12px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; }
+        .table-wrapper { overflow-x: auto; }
+        @media (max-width: 1200px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } .charts-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 768px) { .stats-grid { grid-template-columns: 1fr; } .main-content { padding: 16px; } }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            Proxmox VE Helper-Scripts
+        </a>
+        <div class="nav-links">
+            <a href="/" class="nav-link">📊 Dashboard</a>
+            <a href="/error-analysis" class="nav-link active">🔍 Error Analysis</a>
+        </div>
+    </nav>
+
+    <div class="main-content">
+        <div class="page-header">
+            <h1>🔍 Error Analysis</h1>
+            <p>Detailed error and failure analysis with exit code breakdowns.</p>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
+            <div class="filter-group">
+                <label>Source:</label>
+                <div class="quickfilter">
+                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
+                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
+                    <button class="source-btn" data-repo="all">All</button>
+                </div>
+            </div>
+            <div class="filter-divider"></div>
+            <div class="filter-group">
+                <label>Period:</label>
+                <div class="quickfilter">
+                    <button class="filter-btn" data-days="1">Today</button>
+                    <button class="filter-btn active" data-days="7">7 Days</button>
+                    <button class="filter-btn" data-days="30">30 Days</button>
+                    <button class="filter-btn" data-days="90">90 Days</button>
+                </div>
+            </div>
+            <div style="margin-left: auto;">
+                <button class="btn" onclick="refreshData()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+                    Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Stuck Installing Banner -->
+        <div id="stuckBanner" class="stuck-banner" style="display: none;">
+            <div>
+                <strong>⚠️ <span id="stuckCount">0</span> installations stuck in "Installing" state</strong>
+                <div style="font-size: 12px; margin-top: 4px;">These records have not received a completion status. Cleanup runs every 15 min for records older than 2h.</div>
+            </div>
+            <button class="btn btn-danger" onclick="triggerCleanup()">🧹 Run Cleanup Now</button>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card red">
+                <div class="label">Total Errors</div>
+                <div class="value" id="totalErrors">-</div>
+                <div class="sub">failed + aborted</div>
+            </div>
+            <div class="stat-card orange">
+                <div class="label">Overall Failure Rate</div>
+                <div class="value" id="failRate">-</div>
+                <div class="sub">of all installations</div>
+            </div>
+            <div class="stat-card yellow">
+                <div class="label">Stuck Installing</div>
+                <div class="value" id="stuckCount2">-</div>
+                <div class="sub">no completion received</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="label">Total Installations</div>
+                <div class="value" id="totalInstalls">-</div>
+                <div class="sub">in selected period</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>Error Timeline</h3>
+                <div class="chart-wrapper"><canvas id="timelineChart"></canvas></div>
+            </div>
+            <div class="chart-card">
+                <h3>Error Categories</h3>
+                <div class="chart-wrapper"><canvas id="categoryChart"></canvas></div>
+            </div>
+        </div>
+
+        <!-- Exit Code Distribution -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Exit Code Distribution</h2>
+                    <p>Breakdown of all exit codes returned by failed scripts.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Exit Code</th>
+                            <th>Description</th>
+                            <th>Category</th>
+                            <th>Count</th>
+                            <th>Percentage</th>
+                            <th>Distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody id="exitCodeTable">
+                        <tr><td colspan="6"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Error Categories -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Error Categories</h2>
+                    <p>Grouped errors by type with affected applications.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Count</th>
+                            <th>Percentage</th>
+                            <th>Affected Apps</th>
+                        </tr>
+                    </thead>
+                    <tbody id="categoryTable">
+                        <tr><td colspan="4"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Apps with Errors -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Applications with Errors</h2>
+                    <p>All apps that experienced failures, sorted by error count.</p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="appFilter" placeholder="Filter by app name..." style="background: var(--bg-secondary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 14px; border-radius: 8px; font-size: 13px; outline: none; width: 200px;" oninput="filterAppTable()">
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Application</th>
+                            <th>Type</th>
+                            <th>Total</th>
+                            <th>Failed</th>
+                            <th>Aborted</th>
+                            <th>Fail Rate</th>
+                            <th>Top Exit Code</th>
+                            <th>Top Error</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="appErrorTable">
+                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Recent Error Log -->
+        <div class="section-card">
+            <div class="section-header">
+                <div>
+                    <h2>Recent Error Log</h2>
+                    <p>Last 100 failed or aborted installations.</p>
+                </div>
+            </div>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Type</th>
+                            <th>Application</th>
+                            <th>Exit Code</th>
+                            <th>Category</th>
+                            <th>Error</th>
+                            <th>OS</th>
+                            <th>Timestamp</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recentErrorTable">
+                        <tr><td colspan="9"><div class="loading"><div class="loading-spinner"></div>Loading...</div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- GitHub Issue Modal -->
+    <div class="modal-overlay" id="issueModal" onclick="if(event.target===this)closeIssueModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>🐛 Create GitHub Issue</h2>
+                <button class="modal-close" onclick="closeIssueModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="issueAlert" class="alert-box" style="display: none;"></div>
+                <div class="form-group">
+                    <label>Admin Password *</label>
+                    <input type="password" id="issuePassword" class="form-input" placeholder="Enter admin password...">
+                </div>
+                <div class="form-group">
+                    <label>Issue Title</label>
+                    <input type="text" id="issueTitle" class="form-input">
+                </div>
+                <div class="form-group">
+                    <label>Issue Body</label>
+                    <textarea id="issueBody" class="form-input"></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Labels (comma-separated)</label>
+                    <input type="text" id="issueLabels" class="form-input" value="bug, telemetry">
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;">
+                    <button class="btn" onclick="closeIssueModal()">Cancel</button>
+                    <button class="btn btn-primary" id="submitIssueBtn" onclick="submitIssue()">Create Issue</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cleanup Modal -->
+    <div class="modal-overlay" id="cleanupModal" onclick="if(event.target===this)closeCleanupModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2>🧹 Trigger Cleanup</h2>
+                <button class="modal-close" onclick="closeCleanupModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="cleanupAlert" class="alert-box" style="display: none;"></div>
+                <p style="margin-bottom: 16px; color: var(--text-secondary);">This will mark all stuck "Installing" records (older than 2h) as "unknown". This action requires the admin password.</p>
+                <div class="form-group">
+                    <label>Admin Password *</label>
+                    <input type="password" id="cleanupPassword" class="form-input" placeholder="Enter admin password...">
+                </div>
+                <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px;">
+                    <button class="btn" onclick="closeCleanupModal()">Cancel</button>
+                    <button class="btn btn-danger" id="runCleanupBtn" onclick="runCleanup()">Run Cleanup</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let charts = {};
+        let currentData = null;
+        let currentTheme = localStorage.getItem('theme') || 'dark';
+        if (currentTheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+
+        const catColors = {
+            'apt': '#ef4444', 'network': '#3b82f6', 'permission': '#f97316',
+            'command_not_found': '#a855f7', 'user_aborted': '#64748b', 'timeout': '#eab308',
+            'storage': '#ec4899', 'resource': '#f97316', 'dependency': '#22d3ee',
+            'signal': '#eab308', 'config': '#84cc16', 'unknown': '#64748b',
+            'uncategorized': '#94a3b8'
+        };
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function formatTimestamp(ts) {
+            if (!ts) return '-';
+            return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+        }
+
+        async function fetchData() {
+            const days = document.querySelector('.filter-btn.active')?.dataset.days || '7';
+            const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+            try {
+                const resp = await fetch('/api/errors?days=' + days + '&repo=' + repo);
+                if (!resp.ok) throw new Error('Fetch failed');
+                return await resp.json();
+            } catch (e) {
+                console.error(e);
+                return null;
+            }
+        }
+
+        function updateStats(data) {
+            document.getElementById('totalErrors').textContent = (data.total_errors || 0).toLocaleString();
+            document.getElementById('failRate').textContent = (data.overall_fail_rate || 0).toFixed(1) + '%';
+            document.getElementById('stuckCount2').textContent = (data.stuck_installing || 0).toLocaleString();
+            document.getElementById('totalInstalls').textContent = (data.total_installs || 0).toLocaleString();
+
+            // Stuck banner
+            if (data.stuck_installing > 0) {
+                document.getElementById('stuckBanner').style.display = 'flex';
+                document.getElementById('stuckCount').textContent = data.stuck_installing;
+            } else {
+                document.getElementById('stuckBanner').style.display = 'none';
+            }
+        }
+
+        function updateExitCodeTable(exitCodes) {
+            const tbody = document.getElementById('exitCodeTable');
+            if (!exitCodes || exitCodes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px;">No exit code data</td></tr>';
+                return;
+            }
+            const maxCount = Math.max(...exitCodes.map(e => e.count));
+            tbody.innerHTML = exitCodes.map(e => {
+                const barWidth = (e.count / maxCount * 100).toFixed(0);
+                const codeClass = e.exit_code === 0 ? 'ok' : 'err';
+                const catClass = (e.category || 'unknown').replace(/ /g, '_');
+                return '<tr>' +
+                    '<td><span class="exit-code ' + codeClass + '">' + e.exit_code + '</span></td>' +
+                    '<td>' + escapeHtml(e.description) + '</td>' +
+                    '<td><span class="category-badge ' + catClass + '">' + escapeHtml(e.category) + '</span></td>' +
+                    '<td><strong>' + e.count.toLocaleString() + '</strong></td>' +
+                    '<td>' + e.percentage.toFixed(1) + '%</td>' +
+                    '<td style="min-width:150px;"><div class="progress-bar"><div class="progress-bar-fill" style="width:' + barWidth + '%;background:var(--accent-red);"></div></div></td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function updateCategoryTable(categories) {
+            const tbody = document.getElementById('categoryTable');
+            if (!categories || categories.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:24px;">No category data</td></tr>';
+                return;
+            }
+            tbody.innerHTML = categories.map(c => {
+                const catClass = (c.category || 'unknown').replace(/ /g, '_');
+                return '<tr>' +
+                    '<td><span class="category-badge ' + catClass + '">' + escapeHtml(c.category) + '</span></td>' +
+                    '<td><strong>' + c.count.toLocaleString() + '</strong></td>' +
+                    '<td>' + c.percentage.toFixed(1) + '%</td>' +
+                    '<td style="font-size:12px;color:var(--text-secondary);max-width:400px;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(c.top_apps) + '</td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        let allAppErrors = [];
+        function updateAppErrorTable(apps) {
+            allAppErrors = apps || [];
+            filterAppTable();
+        }
+
+        function filterAppTable() {
+            const filter = (document.getElementById('appFilter').value || '').toLowerCase();
+            const filtered = filter ? allAppErrors.filter(a => a.app.toLowerCase().includes(filter)) : allAppErrors;
+            const tbody = document.getElementById('appErrorTable');
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No matching apps</td></tr>';
+                return;
+            }
+            tbody.innerHTML = filtered.map(a => {
+                const typeClass = (a.type || '').toLowerCase();
+                const failRateColor = a.failure_rate > 50 ? 'var(--accent-red)' : a.failure_rate > 20 ? 'var(--accent-orange)' : 'var(--accent-yellow)';
+                const topCat = a.top_category ? '<span class="category-badge ' + a.top_category + '">' + escapeHtml(a.top_category) + '</span>' : '-';
+                return '<tr>' +
+                    '<td><strong>' + escapeHtml(a.app) + '</strong></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + (a.type || '-').toUpperCase() + '</span></td>' +
+                    '<td>' + a.total_count + '</td>' +
+                    '<td style="color:var(--accent-red);font-weight:600;">' + a.failed_count + '</td>' +
+                    '<td style="color:var(--accent-purple);">' + (a.aborted_count || 0) + '</td>' +
+                    '<td style="color:' + failRateColor + ';font-weight:600;">' + a.failure_rate.toFixed(1) + '%</td>' +
+                    '<td>' + (a.top_exit_code ? '<span class="exit-code err">' + a.top_exit_code + '</span>' : '-') + '</td>' +
+                    '<td class="error-text" title="' + escapeHtml(a.top_error) + '">' + escapeHtml(a.top_error || '-') + '</td>' +
+                    '<td><button class="btn" onclick="openIssueModal(\'' + escapeHtml(a.app) + '\',' + (a.top_exit_code||0) + ',\'' + escapeHtml((a.top_error||'').replace(/'/g,'')) + '\',' + a.failure_rate.toFixed(1) + ')">🐛 Issue</button></td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function updateRecentErrors(errors) {
+            const tbody = document.getElementById('recentErrorTable');
+            if (!errors || errors.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No recent errors</td></tr>';
+                return;
+            }
+            tbody.innerHTML = errors.map(e => {
+                const statusClass = e.status || 'unknown';
+                const typeClass = (e.type || '').toLowerCase();
+                const codeClass = e.exit_code === 0 ? 'ok' : 'err';
+                const catClass = (e.error_category || 'unknown').replace(/ /g, '_');
+                const os = e.os_type ? e.os_type + (e.os_version ? ' ' + e.os_version : '') : '-';
+                return '<tr>' +
+                    '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(e.status) + '</span></td>' +
+                    '<td><span class="type-badge ' + typeClass + '">' + (e.type || '-').toUpperCase() + '</span></td>' +
+                    '<td><strong>' + escapeHtml(e.nsapp) + '</strong></td>' +
+                    '<td><span class="exit-code ' + codeClass + '">' + e.exit_code + '</span></td>' +
+                    '<td><span class="category-badge ' + catClass + '">' + escapeHtml(e.error_category || 'unknown') + '</span></td>' +
+                    '<td class="error-text" title="' + escapeHtml(e.error) + '">' + escapeHtml(e.error || '-') + '</td>' +
+                    '<td>' + escapeHtml(os) + '</td>' +
+                    '<td style="white-space:nowrap;">' + formatTimestamp(e.created) + '</td>' +
+                    '<td><button class="btn" onclick="openIssueModal(\'' + escapeHtml(e.nsapp) + '\',' + e.exit_code + ',\'' + escapeHtml((e.error||'').replace(/'/g,'').substring(0,200)) + '\',0)">🐛</button></td>' +
+                '</tr>';
+            }).join('');
+        }
+
+        function updateCharts(data) {
+            // Timeline chart
+            if (charts.timeline) charts.timeline.destroy();
+            const timeline = data.error_timeline || [];
+            charts.timeline = new Chart(document.getElementById('timelineChart'), {
+                type: 'line',
+                data: {
+                    labels: timeline.map(d => d.date.slice(5)),
+                    datasets: [
+                        { label: 'Failed', data: timeline.map(d => d.failed), borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.1)', fill: true, tension: 0.4, borderWidth: 2 },
+                        { label: 'Aborted', data: timeline.map(d => d.aborted), borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.1)', fill: true, tension: 0.4, borderWidth: 2 }
+                    ]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#8b949e', usePointStyle: true } } }, scales: { x: { ticks: { color: '#8b949e' }, grid: { color: '#2d3748' } }, y: { ticks: { color: '#8b949e' }, grid: { color: '#2d3748' } } } }
+            });
+
+            // Category pie chart
+            if (charts.category) charts.category.destroy();
+            const cats = data.category_stats || [];
+            charts.category = new Chart(document.getElementById('categoryChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: cats.map(c => c.category),
+                    datasets: [{ data: cats.map(c => c.count), backgroundColor: cats.map(c => catColors[c.category] || '#64748b'), borderWidth: 0 }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#8b949e', padding: 12 } } } }
+            });
+        }
+
+        // GitHub Issue Modal
+        function openIssueModal(app, exitCode, errorText, failRate) {
+            const title = '[Telemetry] ' + app + ': Error (exit code ' + exitCode + ')';
+            const fence = String.fromCharCode(96,96,96);
+            const body = '## Telemetry Error Report\n\n' +
+                '**Application:** ' + app + '\n' +
+                '**Exit Code:** ' + exitCode + '\n' +
+                '**Failure Rate:** ' + failRate + '%\n\n' +
+                '### Error Details\n' + fence + '\n' + errorText + '\n' + fence + '\n\n' +
+                '---\n*Created from telemetry error analysis dashboard.*';
+            document.getElementById('issueTitle').value = title;
+            document.getElementById('issueBody').value = body;
+            document.getElementById('issueAlert').style.display = 'none';
+            document.getElementById('issueModal').classList.add('active');
+        }
+
+        function closeIssueModal() {
+            document.getElementById('issueModal').classList.remove('active');
+        }
+
+        async function submitIssue() {
+            const btn = document.getElementById('submitIssueBtn');
+            const alert = document.getElementById('issueAlert');
+            const password = document.getElementById('issuePassword').value;
+            if (!password) { alert.className = 'alert-box error'; alert.textContent = 'Password required'; alert.style.display = 'block'; return; }
+
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+
+            try {
+                const resp = await fetch('/api/github/create-issue', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        password: password,
+                        title: document.getElementById('issueTitle').value,
+                        body: document.getElementById('issueBody').value,
+                        labels: document.getElementById('issueLabels').value.split(',').map(l => l.trim()).filter(Boolean)
+                    })
+                });
+                const data = await resp.json();
+                if (resp.ok && data.success) {
+                    alert.className = 'alert-box success';
+                    alert.innerHTML = '✅ Issue created! <a href="' + data.issue_url + '" target="_blank" style="color:var(--accent-green);">View on GitHub →</a>';
+                    alert.style.display = 'block';
+                } else {
+                    throw new Error(data.message || resp.statusText || 'Failed');
+                }
+            } catch (e) {
+                alert.className = 'alert-box error';
+                alert.textContent = '❌ ' + e.message;
+                alert.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Create Issue';
+            }
+        }
+
+        // Cleanup Modal
+        function triggerCleanup() {
+            document.getElementById('cleanupAlert').style.display = 'none';
+            document.getElementById('cleanupModal').classList.add('active');
+        }
+
+        function closeCleanupModal() {
+            document.getElementById('cleanupModal').classList.remove('active');
+        }
+
+        async function runCleanup() {
+            const btn = document.getElementById('runCleanupBtn');
+            const alert = document.getElementById('cleanupAlert');
+            const password = document.getElementById('cleanupPassword').value;
+            if (!password) { alert.className = 'alert-box error'; alert.textContent = 'Password required'; alert.style.display = 'block'; return; }
+
+            btn.disabled = true;
+            btn.textContent = 'Running...';
+
+            try {
+                const resp = await fetch('/api/cleanup/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    alert.className = 'alert-box success';
+                    alert.textContent = '✅ ' + data.message;
+                    alert.style.display = 'block';
+                    setTimeout(() => { closeCleanupModal(); refreshData(); }, 2000);
+                } else {
+                    throw new Error(data.message || resp.statusText || 'Failed');
+                }
+            } catch (e) {
+                alert.className = 'alert-box error';
+                alert.textContent = '❌ ' + e.message;
+                alert.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Cleanup';
+            }
+        }
+
+        async function refreshData() {
+            const data = await fetchData();
+            if (!data) return;
+            currentData = data;
+            updateStats(data);
+            updateExitCodeTable(data.exit_code_stats);
+            updateCategoryTable(data.category_stats);
+            updateAppErrorTable(data.app_errors);
+            updateRecentErrors(data.recent_errors);
+            updateCharts(data);
+        }
+
+        // Filter button handling
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
+        document.querySelectorAll('.source-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                refreshData();
+            });
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeIssueModal(); closeCleanupModal(); } });
+
+        // Initial load
+        refreshData();
     </script>
 </body>
 </html>`

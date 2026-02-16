@@ -57,6 +57,12 @@ type Config struct {
 	AlertFailureThreshold float64
 	AlertCheckInterval    time.Duration
 	AlertCooldown         time.Duration
+
+	// GitHub Integration
+	GitHubToken    string // Personal access token for creating issues
+	GitHubOwner    string // Repository owner (e.g., "community-scripts")
+	GitHubRepo     string // Repository name (e.g., "ProxmoxVE")
+	AdminPassword  string // Password to protect admin actions (issue creation)
 }
 
 // TelemetryIn matches payload from api.func (bash client)
@@ -335,7 +341,7 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=130 || error~'SIGINT' || error~'Ctrl+C' || error~'Ctrl-C')))")
 		} else if status == "failed" {
 			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
-			filters = append(filters, "(status='failed' && exit_code!=130 && error!~'SIGINT' && error!~'Ctrl+C' && error!~'Ctrl-C')")
+			filters = append(filters, "(status='failed' && exit_code!=130 && !(error~'SIGINT') && !(error~'Ctrl+C') && !(error~'Ctrl-C'))")
 		} else {
 			filters = append(filters, fmt.Sprintf("status='%s'", status))
 		}
@@ -473,86 +479,6 @@ func (p *PBClient) CreateTelemetry(ctx context.Context, payload TelemetryOut) er
 		return fmt.Errorf("pocketbase create failed: %s: %s", resp.Status, strings.TrimSpace(string(rb)))
 	}
 	return nil
-}
-
-// MigrateRepoSource updates all records with empty repo_source to the specified value.
-// Returns the number of records updated.
-func (p *PBClient) MigrateRepoSource(ctx context.Context, targetRepo string) (int, error) {
-	if err := p.ensureAuth(ctx); err != nil {
-		return 0, err
-	}
-
-	updated := 0
-	page := 1
-	perPage := 100
-
-	for {
-		// Fetch records with empty repo_source
-		reqURL := fmt.Sprintf("%s/api/collections/%s/records?filter=%s&page=%d&perPage=%d",
-			p.baseURL, p.targetColl,
-			url.QueryEscape("repo_source=''"),
-			page, perPage)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return updated, err
-		}
-		req.Header.Set("Authorization", "Bearer "+p.token)
-
-		resp, err := p.http.Do(req)
-		if err != nil {
-			return updated, err
-		}
-
-		var result struct {
-			Items []struct {
-				ID string `json:"id"`
-			} `json:"items"`
-			TotalItems int `json:"totalItems"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return updated, err
-		}
-		resp.Body.Close()
-
-		if len(result.Items) == 0 {
-			break
-		}
-
-		// Update each record
-		for _, item := range result.Items {
-			updatePayload := map[string]string{"repo_source": targetRepo}
-			b, _ := json.Marshal(updatePayload)
-
-			patchReq, err := http.NewRequestWithContext(ctx, http.MethodPatch,
-				fmt.Sprintf("%s/api/collections/%s/records/%s", p.baseURL, p.targetColl, item.ID),
-				bytes.NewReader(b),
-			)
-			if err != nil {
-				continue
-			}
-			patchReq.Header.Set("Content-Type", "application/json")
-			patchReq.Header.Set("Authorization", "Bearer "+p.token)
-
-			patchResp, err := p.http.Do(patchReq)
-			if err != nil {
-				continue
-			}
-			patchResp.Body.Close()
-
-			if patchResp.StatusCode >= 200 && patchResp.StatusCode < 300 {
-				updated++
-			}
-		}
-
-		// Continue to next page (records shift as we update, so stay on page 1)
-		if result.TotalItems <= perPage {
-			break
-		}
-	}
-
-	return updated, nil
 }
 
 // -------- Rate limiter (token bucket / minute window, simple) --------
@@ -702,6 +628,38 @@ var (
 	allowedErrorCategory = map[string]bool{
 		"network": true, "storage": true, "dependency": true, "permission": true,
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
+		"user_aborted": true, "apt": true, "command_not_found": true, "signal": true,
+	}
+
+	// exitCodeCategories maps well-known exit codes to error categories
+	exitCodeCategories = map[int]string{
+		1:   "unknown",           // General error
+		2:   "unknown",           // Misuse of shell builtins
+		100: "apt",               // APT: package manager error (broken packages / dependency problems)
+		126: "permission",        // Command invoked cannot execute (permission problem or not executable)
+		127: "command_not_found", // Command not found
+		128: "signal",            // Invalid argument to exit
+		130: "user_aborted",      // Script terminated by Ctrl+C (SIGINT)
+		137: "resource",          // SIGKILL - often OOM killer
+		139: "unknown",           // SIGSEGV - segfault
+		141: "unknown",           // SIGPIPE
+		143: "signal",            // SIGTERM
+	}
+
+	// exitCodeDescriptions provides human-readable exit code descriptions
+	exitCodeDescriptions = map[int]string{
+		0:   "Success",
+		1:   "General error",
+		2:   "Misuse of shell builtins",
+		100: "APT: Package manager error (broken packages / dependency problems)",
+		126: "Command invoked cannot execute (permission problem or not executable)",
+		127: "Command not found",
+		128: "Invalid argument to exit",
+		130: "Script terminated by Ctrl+C (SIGINT)",
+		137: "Process killed (SIGKILL) - likely OOM",
+		139: "Segmentation fault (SIGSEGV)",
+		141: "Broken pipe (SIGPIPE)",
+		143: "Process terminated (SIGTERM)",
 	}
 )
 
@@ -720,7 +678,6 @@ func sanitizeShort(s string, max int) string {
 }
 
 // sanitizeMultiLine allows newlines (for log output) but limits total length.
-// Also strips ANSI escape sequences and non-printable control characters.
 func sanitizeMultiLine(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -728,29 +685,6 @@ func sanitizeMultiLine(s string, max int) string {
 	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	// Strip ANSI escape sequences (e.g. color codes)
-	var cleaned strings.Builder
-	cleaned.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
-			// Skip ANSI CSI sequence: ESC [ ... <final byte>
-			i += 2
-			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x3f {
-				i++ // parameter bytes
-			}
-			if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
-				i++ // final byte
-			}
-			continue
-		}
-		// Keep printable chars, newlines, and tabs; drop other control chars
-		if s[i] == '\n' || s[i] == '\t' || s[i] >= 0x20 {
-			cleaned.WriteByte(s[i])
-		}
-		i++
-	}
-	s = cleaned.String()
 	if len(s) > max {
 		s = s[:max]
 	}
@@ -877,6 +811,72 @@ func computeHash(out TelemetryOut) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// categorizeErrorText assigns an error_category based on error text patterns
+func categorizeErrorText(errLower string) string {
+	// Network errors
+	if strings.Contains(errLower, "connection refused") ||
+		strings.Contains(errLower, "could not resolve") ||
+		strings.Contains(errLower, "dns") ||
+		strings.Contains(errLower, "failed to download") ||
+		strings.Contains(errLower, "curl") ||
+		strings.Contains(errLower, "wget") ||
+		strings.Contains(errLower, "network unreachable") ||
+		strings.Contains(errLower, "timed out") ||
+		strings.Contains(errLower, "ssl") ||
+		strings.Contains(errLower, "certificate") {
+		return "network"
+	}
+	// APT / package manager
+	if strings.Contains(errLower, "apt") ||
+		strings.Contains(errLower, "dpkg") ||
+		strings.Contains(errLower, "broken packages") ||
+		strings.Contains(errLower, "unmet dependencies") ||
+		strings.Contains(errLower, "unable to locate package") {
+		return "apt"
+	}
+	// Storage
+	if strings.Contains(errLower, "no space left") ||
+		strings.Contains(errLower, "disk full") ||
+		strings.Contains(errLower, "read-only file system") ||
+		strings.Contains(errLower, "i/o error") {
+		return "storage"
+	}
+	// Permission
+	if strings.Contains(errLower, "permission denied") ||
+		strings.Contains(errLower, "operation not permitted") ||
+		strings.Contains(errLower, "access denied") {
+		return "permission"
+	}
+	// Command not found
+	if strings.Contains(errLower, "command not found") ||
+		strings.Contains(errLower, "not found") {
+		return "command_not_found"
+	}
+	// Dependency
+	if strings.Contains(errLower, "dependency") ||
+		strings.Contains(errLower, "requires") ||
+		strings.Contains(errLower, "missing") {
+		return "dependency"
+	}
+	// Resource
+	if strings.Contains(errLower, "oom") ||
+		strings.Contains(errLower, "out of memory") ||
+		strings.Contains(errLower, "cannot allocate") {
+		return "resource"
+	}
+	// Config
+	if strings.Contains(errLower, "config") ||
+		strings.Contains(errLower, "syntax error") ||
+		strings.Contains(errLower, "invalid") {
+		return "config"
+	}
+	// Timeout
+	if strings.Contains(errLower, "timeout") {
+		return "timeout"
+	}
+	return "unknown"
+}
+
 // -------- HTTP server --------
 
 func main() {
@@ -890,7 +890,7 @@ func main() {
 		PBPassword:       mustEnv("PB_PASSWORD"),
 		PBTargetColl:     mustEnv("PB_TARGET_COLLECTION"),
 
-		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 8192),
+		MaxBodyBytes:     envInt64("MAX_BODY_BYTES", 1024),
 		RateLimitRPM:     envInt("RATE_LIMIT_RPM", 60),
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
@@ -916,6 +916,12 @@ func main() {
 		AlertFailureThreshold: envFloat("ALERT_FAILURE_THRESHOLD", 20.0),
 		AlertCheckInterval:    time.Duration(envInt("ALERT_CHECK_INTERVAL_MIN", 15)) * time.Minute,
 		AlertCooldown:         time.Duration(envInt("ALERT_COOLDOWN_MIN", 60)) * time.Minute,
+
+		// GitHub integration
+		GitHubToken:   env("GITHUB_TOKEN", ""),
+		GitHubOwner:   env("GITHUB_OWNER", "community-scripts"),
+		GitHubRepo:    env("GITHUB_REPO", "ProxmoxVE"),
+		AdminPassword: env("ADMIN_PASSWORD", ""),
 	}
 
 	var pt *ProxyTrust
@@ -956,8 +962,8 @@ func main() {
 	// Initialize cleanup/retention job (GDPR Löschkonzept)
 	cleaner := NewCleaner(CleanupConfig{
 		Enabled:          envBool("CLEANUP_ENABLED", true),
-		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 60)) * time.Minute,
-		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 24),
+		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 15)) * time.Minute,
+		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 2),
 		RetentionEnabled: envBool("RETENTION_ENABLED", false),
 		RetentionDays:    envInt("RETENTION_DAYS", 365),
 	}, pb)
@@ -1064,10 +1070,10 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		// Try cache first (stale-while-revalidate) - but skip cache for Today and 7 Days
+		// Try cache first (stale-while-revalidate)
 		cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repoSource)
 		var data *DashboardData
-		if cfg.CacheEnabled && days > 7 && cache.Get(ctx, cacheKey, &data) {
+		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
 			// Serve cached data immediately
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
@@ -1103,11 +1109,14 @@ func main() {
 		}
 
 		// Cache the result with dynamic TTL based on period
-		// Today and 7 Days: NO CACHE (live data)
-		// Longer periods: cache to reduce DB load
-		if cfg.CacheEnabled && days > 7 {
+		if cfg.CacheEnabled {
+			// Short periods change faster → shorter cache TTL
 			cacheTTL := cfg.CacheTTL
 			switch {
+			case days <= 1:
+				cacheTTL = 30 * time.Second // Today: 30s cache
+			case days <= 7:
+				cacheTTL = 2 * time.Minute // 7 Days: 2min cache
 			case days <= 30:
 				cacheTTL = 5 * time.Minute // 30 Days: 5min cache
 			case days <= 90:
@@ -1224,43 +1233,187 @@ func main() {
 		w.Write([]byte("test alert sent"))
 	})
 
-	// Migration endpoint to fix empty repo_source records
-	// Protected by PocketBase credentials (same as backend authentication)
-	mux.HandleFunc("/api/migrate-repo-source", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+	// Error Analysis page
+	mux.HandleFunc("/error-analysis", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		_, _ = w.Write([]byte(ErrorAnalysisHTML()))
+	})
+
+	// Error Analysis API - detailed error data
+	mux.HandleFunc("/api/errors", func(w http.ResponseWriter, r *http.Request) {
+		days := 7
+		if d := r.URL.Query().Get("days"); d != "" {
+			fmt.Sscanf(d, "%d", &days)
+			if days < 1 {
+				days = 1
+			}
+			if days > 365 {
+				days = 365
+			}
 		}
 
-		// Require admin key from query parameter (use PB_PASSWORD as simple protection)
-		adminKey := r.URL.Query().Get("key")
-		if adminKey == "" || adminKey != cfg.PBPassword {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		repoSource := r.URL.Query().Get("repo")
+		if repoSource == "" {
+			repoSource = "ProxmoxVE"
+		}
+		if repoSource == "all" {
+			repoSource = ""
 		}
 
-		targetRepo := r.URL.Query().Get("repo")
-		if targetRepo == "" {
-			targetRepo = "ProxmoxVE" // Default
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
-		count, err := pb.MigrateRepoSource(ctx, targetRepo)
+		data, err := pb.FetchErrorAnalysisData(ctx, days, repoSource)
 		if err != nil {
-			log.Printf("migration error: %v", err)
-			http.Error(w, fmt.Sprintf("migration error: %v (updated %d records before error)", err, count), http.StatusInternalServerError)
+			log.Printf("error analysis fetch failed: %v", err)
+			http.Error(w, "failed to fetch error data", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(data)
+	})
+
+	// API: Get exit code descriptions (static reference data)
+	mux.HandleFunc("/api/exit-codes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(exitCodeDescriptions)
+	})
+
+	// Cleanup trigger & status API
+	mux.HandleFunc("/api/cleanup/status", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		count, err := cleaner.GetStuckCount(ctx)
+		if err != nil {
+			http.Error(w, "failed to check stuck count", http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":         true,
-			"records_updated": count,
-			"target_repo":     targetRepo,
+			"stuck_count":      count,
+			"stuck_after_hours": cleaner.cfg.StuckAfterHours,
+			"check_interval":   cleaner.cfg.CheckInterval.String(),
+			"enabled":          cleaner.cfg.Enabled,
 		})
-		log.Printf("migration completed: %d records updated to repo_source=%s", count, targetRepo)
+	})
+
+	mux.HandleFunc("/api/cleanup/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Require admin password
+		if cfg.AdminPassword == "" {
+			http.Error(w, "admin password not configured", http.StatusServiceUnavailable)
+			return
+		}
+		password := r.Header.Get("X-Admin-Password")
+		if password == "" {
+			// Try from JSON body
+			var body struct {
+				Password string `json:"password"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			password = body.Password
+		}
+		if password != cfg.AdminPassword {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		updated, err := cleaner.RunNow()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"updated": updated,
+			"message": fmt.Sprintf("Cleaned up %d stuck installations", updated),
+		})
+	})
+
+	// GitHub Issue creation API
+	mux.HandleFunc("/api/github/create-issue", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Require admin password
+		if cfg.AdminPassword == "" {
+			http.Error(w, "admin password not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		var body struct {
+			Password    string `json:"password"`
+			Title       string `json:"title"`
+			Body        string `json:"body"`
+			Labels      []string `json:"labels"`
+			AppName     string `json:"app_name"`
+			ExitCode    int    `json:"exit_code"`
+			ErrorText   string `json:"error_text"`
+			FailureRate float64 `json:"failure_rate"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if body.Password != cfg.AdminPassword {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if cfg.GitHubToken == "" {
+			http.Error(w, "GitHub token not configured", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Build issue body if not provided
+		if body.Body == "" {
+			body.Body = fmt.Sprintf("## Telemetry Error Report\n\n"+
+				"**Application:** %s\n"+
+				"**Exit Code:** %d\n"+
+				"**Error Category:** %s\n"+
+				"**Failure Rate:** %.1f%%\n\n"+
+				"### Error Details\n```\n%s\n```\n\n"+
+				"---\n*This issue was automatically created from the telemetry error analysis dashboard.*",
+				body.AppName, body.ExitCode,
+				categorizeExitCode(body.ExitCode),
+				body.FailureRate, body.ErrorText)
+		}
+
+		if body.Title == "" {
+			body.Title = fmt.Sprintf("[Telemetry] %s: %s (exit code %d)",
+				body.AppName, categorizeExitCode(body.ExitCode), body.ExitCode)
+		}
+
+		// Default labels
+		if len(body.Labels) == 0 {
+			body.Labels = []string{"bug", "telemetry"}
+		}
+
+		// Create GitHub issue via API
+		issueURL, err := createGitHubIssue(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, body.Title, body.Body, body.Labels)
+		if err != nil {
+			log.Printf("ERROR: failed to create GitHub issue: %v", err)
+			http.Error(w, "failed to create issue: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"issue_url": issueURL,
+		})
 	})
 
 	mux.HandleFunc("/telemetry", func(w http.ResponseWriter, r *http.Request) {
@@ -1316,13 +1469,44 @@ func main() {
 
 		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C,
 		// detect and reclassify as "aborted" server-side.
+		errorLower := strings.ToLower(in.Error)
 		if in.Status == "failed" && (in.ExitCode == 130 ||
-			strings.Contains(strings.ToLower(in.Error), "sigint") ||
-			strings.Contains(strings.ToLower(in.Error), "ctrl+c") ||
-			strings.Contains(strings.ToLower(in.Error), "ctrl-c")) {
+			strings.Contains(errorLower, "sigint") ||
+			strings.Contains(errorLower, "ctrl+c") ||
+			strings.Contains(errorLower, "ctrl-c") ||
+			strings.Contains(errorLower, "aborted by user") ||
+			strings.Contains(errorLower, "user abort") ||
+			strings.Contains(errorLower, "cancelled by user") ||
+			strings.Contains(errorLower, "no changes have been made")) {
 			in.Status = "aborted"
+			if in.ErrorCategory == "" || in.ErrorCategory == "unknown" {
+				in.ErrorCategory = "user_aborted"
+			}
 			if cfg.EnableReqLogging {
 				log.Printf("auto-reclassified as aborted: nsapp=%s exit_code=%d", in.NSAPP, in.ExitCode)
+			}
+		}
+
+		// Auto-categorize errors based on exit code when no category provided
+		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") {
+			if cat, ok := exitCodeCategories[in.ExitCode]; ok {
+				in.ErrorCategory = cat
+			}
+		}
+
+		// Auto-categorize based on error text patterns when still uncategorized
+		if in.Status == "failed" && (in.ErrorCategory == "" || in.ErrorCategory == "unknown") && in.Error != "" {
+			in.ErrorCategory = categorizeErrorText(errorLower)
+		}
+
+		// Enrich error text with exit code description if error text is empty
+		if in.Status == "failed" && in.Error == "" && in.ExitCode != 0 {
+			if desc, ok := exitCodeDescriptions[in.ExitCode]; ok {
+				in.Error = fmt.Sprintf("Exit code %d: %s", in.ExitCode, desc)
+			} else if in.ExitCode > 128 && in.ExitCode < 192 {
+				in.Error = fmt.Sprintf("Exit code %d: Killed by signal %d", in.ExitCode, in.ExitCode-128)
+			} else {
+				in.Error = fmt.Sprintf("Exit code %d: Unknown error", in.ExitCode)
 			}
 		}
 
@@ -1413,6 +1597,60 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// categorizeExitCode returns a short human-readable category for an exit code
+func categorizeExitCode(code int) string {
+	if desc, ok := exitCodeDescriptions[code]; ok {
+		return desc
+	}
+	if code > 128 && code < 192 {
+		return fmt.Sprintf("Killed by signal %d", code-128)
+	}
+	return fmt.Sprintf("Unknown (exit code %d)", code)
+}
+
+// createGitHubIssue creates a new issue in the specified GitHub repository
+func createGitHubIssue(token, owner, repo, title, body string, labels []string) (string, error) {
+	payload := map[string]interface{}{
+		"title":  title,
+		"body":   body,
+		"labels": labels,
+	}
+	b, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("https://api.github.com/repos/%s/%s/issues", owner, repo),
+		bytes.NewReader(b),
+	)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return "", fmt.Errorf("GitHub API error %d: %s", resp.StatusCode, string(rb))
+	}
+
+	var result struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	return result.HTMLURL, nil
 }
 
 func env(k, def string) string {

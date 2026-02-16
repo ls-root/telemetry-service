@@ -64,7 +64,7 @@ func (c *Cleaner) cleanupLoop() {
 
 // runCleanup finds and updates stuck installations
 func (c *Cleaner) runCleanup() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	// Find stuck records
@@ -79,19 +79,19 @@ func (c *Cleaner) runCleanup() {
 		return
 	}
 
-	log.Printf("INFO: cleanup - found %d stuck installations", len(stuckRecords))
+	log.Printf("INFO: cleanup - found %d stuck installations (older than %dh)", len(stuckRecords), c.cfg.StuckAfterHours)
 
 	// Update each record
 	updated := 0
 	for _, record := range stuckRecords {
 		if err := c.markAsUnknown(ctx, record.ID); err != nil {
-			log.Printf("WARN: cleanup - failed to update record %s: %v", record.ID, err)
+			log.Printf("WARN: cleanup - failed to update record %s (%s): %v", record.ID, record.NSAPP, err)
 			continue
 		}
 		updated++
 	}
 
-	log.Printf("INFO: cleanup - updated %d stuck installations to 'unknown'", updated)
+	log.Printf("INFO: cleanup - updated %d/%d stuck installations to 'unknown'", updated, len(stuckRecords))
 }
 
 // StuckRecord represents a minimal record for cleanup
@@ -102,6 +102,7 @@ type StuckRecord struct {
 }
 
 // findStuckInstallations finds records that are stuck in "installing" status
+// Paginates through all results to ensure no stuck records are missed
 func (c *Cleaner) findStuckInstallations(ctx context.Context) ([]StuckRecord, error) {
 	if err := c.pb.ensureAuth(ctx); err != nil {
 		return nil, err
@@ -114,37 +115,54 @@ func (c *Cleaner) findStuckInstallations(ctx context.Context) ([]StuckRecord, er
 	// Build filter: status='installing' AND created < cutoff
 	filter := url.QueryEscape(fmt.Sprintf("status='installing' && created<'%s'", cutoffStr))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&perPage=100",
-			c.pb.baseURL, c.pb.targetColl, filter),
-		nil,
-	)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.pb.token)
+	var allRecords []StuckRecord
+	page := 1
+	perPage := 200
 
-	resp, err := c.pb.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/api/collections/%s/records?filter=%s&perPage=%d&page=%d&sort=created",
+				c.pb.baseURL, c.pb.targetColl, filter, perPage, page),
+			nil,
+		)
+		if err != nil {
+			return allRecords, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.pb.token)
 
-	var result struct {
-		Items []StuckRecord `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		resp, err := c.pb.http.Do(req)
+		if err != nil {
+			return allRecords, err
+		}
+
+		var result struct {
+			Items      []StuckRecord `json:"items"`
+			TotalItems int           `json:"totalItems"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return allRecords, err
+		}
+		resp.Body.Close()
+
+		allRecords = append(allRecords, result.Items...)
+
+		// Stop when we've fetched all records
+		if len(allRecords) >= result.TotalItems || len(result.Items) == 0 {
+			break
+		}
+		page++
 	}
 
-	return result.Items, nil
+	return allRecords, nil
 }
 
-// markAsUnknown updates a record's status to "unknown"
+// markAsUnknown updates a stuck record's status to "unknown" with timeout details
 func (c *Cleaner) markAsUnknown(ctx context.Context, recordID string) error {
 	update := TelemetryStatusUpdate{
-		Status: "unknown",
-		Error:  "Installation timed out - no completion status received",
+		Status:        "unknown",
+		Error:         fmt.Sprintf("Installation timed out - no completion status received after %dh", c.cfg.StuckAfterHours),
+		ErrorCategory: "timeout",
 	}
 	return c.pb.UpdateTelemetryStatus(ctx, recordID, update)
 }
