@@ -5220,15 +5220,6 @@ func ScriptAnalysisHTML() string {
 
         <div class="filters-bar" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 24px;">
             <div class="filter-group">
-                <label>Source:</label>
-                <div class="quickfilter">
-                    <button class="source-btn active" data-repo="ProxmoxVE">ProxmoxVE</button>
-                    <button class="source-btn" data-repo="ProxmoxVED">ProxmoxVED</button>
-                    <button class="source-btn" data-repo="all">All</button>
-                </div>
-            </div>
-            <div class="filter-divider"></div>
-            <div class="filter-group">
                 <label>Period:</label>
                 <div class="quickfilter">
                     <button class="filter-btn" data-days="7">7 Days</button>
@@ -5362,7 +5353,7 @@ func ScriptAnalysisHTML() string {
 
         async function fetchData() {
             const days = document.querySelector('.filter-btn.active')?.dataset.days || '30';
-            const repo = document.querySelector('.source-btn.active')?.dataset.repo || 'ProxmoxVE';
+            const repo = 'ProxmoxVE';
             try {
                 const resp = await fetch('/api/scripts?days=' + days + '&repo=' + repo);
                 if (!resp.ok) throw new Error('Fetch failed');
@@ -5534,14 +5525,6 @@ func ScriptAnalysisHTML() string {
                 refreshData();
             });
         });
-        document.querySelectorAll('.source-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                document.querySelectorAll('.source-btn').forEach(b => b.classList.remove('active'));
-                this.classList.add('active');
-                refreshData();
-            });
-        });
-
         refreshData();
     </script>
 </body>
