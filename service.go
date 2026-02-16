@@ -935,6 +935,13 @@ func main() {
 	}
 
 	pb := NewPBClient(cfg)
+
+	// Persistent script stats stores (7d, 30d, all-time)
+	stats7d := NewScriptStatsStore(pb, "_script_stats_7d", 7)
+	stats30d := NewScriptStatsStore(pb, "_script_stats_30d", 30)
+	statsAllTime := NewScriptStatsStore(pb, "_script_stats_alltime", 0)
+	scriptStores := []*ScriptStatsStore{stats7d, stats30d, statsAllTime}
+
 	rl := NewRateLimiter(cfg.RateLimitRPM, cfg.RateBurst)
 
 	// Initialize cache
@@ -1256,7 +1263,8 @@ func main() {
 			if days < 0 {
 				days = 1
 			}
-			if days > 365 {
+			// days=0 is allowed → All Time (served from AllTimeStore)
+			if days > 365 && days != 0 {
 				days = 365
 			}
 		}
@@ -1272,6 +1280,43 @@ func main() {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
 
+		// Persistent stores: 7d, 30d, All Time (days=0)
+		// Only Today (days=1) uses live telemetry fetch
+		var store *ScriptStatsStore
+		switch {
+		case days == 0:
+			store = statsAllTime
+		case days <= 7:
+			store = stats7d
+		case days <= 30:
+			store = stats30d
+		}
+
+		if store != nil {
+			cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
+			var data *ScriptAnalysisData
+			if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Cache", "HIT")
+				json.NewEncoder(w).Encode(data)
+				return
+			}
+
+			// Build from persistent store (instant, ~466 rows in memory)
+			knownScripts, _ := pb.FetchKnownScripts(ctx)
+			data = store.BuildData(knownScripts)
+
+			if cfg.CacheEnabled {
+				_ = cache.Set(ctx, cacheKey, data, 23*time.Hour)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache", "MISS")
+			json.NewEncoder(w).Encode(data)
+			return
+		}
+
+		// Today (days=1): live fetch from telemetry
 		cacheKey := fmt.Sprintf("scripts:%d:%s", days, repoSource)
 		var data *ScriptAnalysisData
 		if cfg.CacheEnabled && cache.Get(ctx, cacheKey, &data) {
@@ -1289,9 +1334,7 @@ func main() {
 							log.Printf("[CACHE] background refresh failed for %s: %v", cacheKey, err)
 							return
 						}
-						refreshTTL := 2 * time.Minute
-						if days > 7 { refreshTTL = 23 * time.Hour }
-						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
+						_ = cache.Set(context.Background(), cacheKey, freshData, 2*time.Minute)
 					}()
 				}
 			}
@@ -1307,14 +1350,7 @@ func main() {
 		}
 
 		if cfg.CacheEnabled {
-			cacheTTL := cfg.CacheTTL
-			switch {
-			case days <= 7:
-				cacheTTL = 2 * time.Minute
-			default:
-				cacheTTL = 23 * time.Hour
-			}
-			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
+			_ = cache.Set(ctx, cacheKey, data, 2*time.Minute)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1460,13 +1496,17 @@ func main() {
 	// GitHub Issue creation API
 	mux.HandleFunc("/api/github/create-issue", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
 			return
 		}
 
 		// Require admin password
 		if cfg.AdminPassword == "" {
-			http.Error(w, "admin password not configured", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "admin password not configured"})
 			return
 		}
 
@@ -1481,17 +1521,23 @@ func main() {
 			FailureRate float64 `json:"failure_rate"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
 			return
 		}
 
 		if body.Password != cfg.AdminPassword {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "incorrect password"})
 			return
 		}
 
 		if cfg.GitHubToken == "" {
-			http.Error(w, "GitHub token not configured", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "GitHub token not configured on server"})
 			return
 		}
 
@@ -1523,7 +1569,9 @@ func main() {
 		issueURL, err := createGitHubIssue(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, body.Title, body.Body, body.Labels)
 		if err != nil {
 			log.Printf("ERROR: failed to create GitHub issue: %v", err)
-			http.Error(w, "failed to create issue: "+err.Error(), http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "failed to create issue: " + err.Error()})
 			return
 		}
 
@@ -1693,9 +1741,40 @@ func main() {
 	// - Nightly at 02:00 UTC: full warmup with 23h TTL (data barely changes intra-day)
 	if cfg.CacheEnabled {
 		go func() {
+			// Load all script stats stores from PocketBase on startup
+			for _, store := range scriptStores {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				if err := store.LoadFromPB(ctx); err != nil {
+					log.Printf("[STATS:%s] LoadFromPB failed: %v", store.label, err)
+				}
+				cancel()
+			}
+
+			// If alltime store is empty, bootstrap from raw telemetry (first run)
+			if statsAllTime.IsEmpty() {
+				log.Println("[STATS:alltime] Store is empty, bootstrapping...")
+				ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
+				if err := statsAllTime.Bootstrap(ctx, "ProxmoxVE"); err != nil {
+					log.Printf("[STATS:alltime] Bootstrap failed: %v", err)
+				}
+				cancel()
+			}
+
+			// If 7d/30d stores are empty, rebuild them
+			for _, store := range []*ScriptStatsStore{stats7d, stats30d} {
+				if store.IsEmpty() {
+					log.Printf("[STATS:%s] Store is empty, rebuilding...", store.label)
+					ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+					if err := store.Rebuild(ctx, "ProxmoxVE"); err != nil {
+						log.Printf("[STATS:%s] Rebuild failed: %v", store.label, err)
+					}
+					cancel()
+				}
+			}
+
 			// Initial full warmup after startup
-			time.Sleep(10 * time.Second)
-			warmupCaches(pb, cache, cfg, false)
+			time.Sleep(5 * time.Second)
+			warmupCaches(pb, cache, cfg, false, scriptStores)
 
 			// Periodic "today" refresh every 15 min
 			todayTicker := time.NewTicker(15 * time.Minute)
@@ -1705,10 +1784,10 @@ func main() {
 			for {
 				select {
 				case <-todayTicker.C:
-					warmupCaches(pb, cache, cfg, true)
+					warmupCaches(pb, cache, cfg, true, scriptStores)
 				case <-nightlyTimer.C:
 					log.Println("[CACHE] Nightly full warmup triggered")
-					warmupCaches(pb, cache, cfg, false)
+					warmupCaches(pb, cache, cfg, false, scriptStores)
 					nightlyTimer.Reset(24 * time.Hour)
 				}
 			}
@@ -1870,7 +1949,7 @@ func timeUntilNextUTC(hour, minute int) time.Duration {
 // warmupCaches pre-populates the cache for dashboard, scripts, AND errors endpoints.
 // If todayOnly=true, only warms days=1 (fast refresh for current-day data).
 // If todayOnly=false, warms all day ranges with long TTLs (nightly/startup).
-func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
+func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool, stores []*ScriptStatsStore) {
 	label := "full"
 	if todayOnly {
 		label = "today-only"
@@ -1878,18 +1957,41 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
 	log.Printf("[CACHE] Starting %s cache warmup...", label)
 	start := time.Now()
 
-	dayRanges := []int{1, 7, 30, 90, 365}
-	if todayOnly {
-		dayRanges = []int{1}
+	dayRanges := []int{1}
+	if !todayOnly {
+		dayRanges = []int{1, 90, 365} // Only Today + ranges without persistent store
 	}
-	repos := []string{"ProxmoxVE"} // Script Analysis only shows ProxmoxVE
+	repos := []string{"ProxmoxVE"}
 
 	warmed := 0
 	failed := 0
 
+	// Update all persistent stores + cache their data on full warmup
+	if !todayOnly {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		knownScripts, _ := pb.FetchKnownScripts(ctx)
+		cancel()
+
+		for _, store := range stores {
+			uCtx, uCancel := context.WithTimeout(context.Background(), 600*time.Second)
+			err := store.Update(uCtx, "ProxmoxVE")
+			uCancel()
+			if err != nil {
+				log.Printf("[CACHE] store %s update failed: %v", store.label, err)
+				failed++
+				continue
+			}
+
+			// Build + cache the data
+			data := store.BuildData(knownScripts)
+			cacheKey := fmt.Sprintf("scripts:%d:ProxmoxVE", store.windowDays)
+			_ = cache.Set(context.Background(), cacheKey, data, 23*time.Hour)
+			warmed++
+			log.Printf("[CACHE] scripts:%d cache warmed from persistent store (%s)", store.windowDays, store.label)
+		}
+	}
+
 	for _, days := range dayRanges {
-		// Today: short TTL (changes with every install)
-		// Non-today: 23h TTL (survives until next nightly run)
 		cacheTTL := 2 * time.Minute
 		if days > 1 {
 			cacheTTL = 23 * time.Hour

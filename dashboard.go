@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -294,6 +295,497 @@ type RecentScript struct {
 	PveVer    string `json:"pve_version"`
 	Created   string `json:"created"`
 	Method    string `json:"method"`
+}
+
+// ========================================================
+// Script Stats Store (persistent in PocketBase collections)
+// Used for _script_stats_7d, _script_stats_30d, _script_stats_alltime
+// ========================================================
+
+// CachedScriptStat represents one row in a _script_stats_* collection
+type CachedScriptStat struct {
+	ID         string `json:"id,omitempty"`
+	Slug       string `json:"slug"`
+	Type       string `json:"type"`
+	Total      int    `json:"total"`
+	Success    int    `json:"success"`
+	Failed     int    `json:"failed"`
+	Aborted    int    `json:"aborted"`
+	Installing int    `json:"installing"`
+	LastDate   string `json:"last_date"`
+}
+
+// ScriptStatsStore manages persistent script stats for a specific time window
+type ScriptStatsStore struct {
+	mu         sync.RWMutex
+	stats      map[string]*CachedScriptStat // key = slug
+	pb         *PBClient
+	collection string // PocketBase collection name (e.g. "_script_stats_7d")
+	windowDays int    // 7, 30, or 0 (0 = all-time / incremental)
+	label      string // log label
+}
+
+func NewScriptStatsStore(pb *PBClient, collection string, windowDays int) *ScriptStatsStore {
+	label := fmt.Sprintf("%dd", windowDays)
+	if windowDays == 0 {
+		label = "alltime"
+	}
+	return &ScriptStatsStore{
+		stats:      make(map[string]*CachedScriptStat),
+		pb:         pb,
+		collection: collection,
+		windowDays: windowDays,
+		label:      label,
+	}
+}
+
+// LoadFromPB reads all existing rows from the collection
+func (s *ScriptStatsStore) LoadFromPB(ctx context.Context) error {
+	if err := s.pb.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.stats = make(map[string]*CachedScriptStat)
+	page := 1
+	perPage := 500
+
+	for {
+		reqURL := fmt.Sprintf("%s/api/collections/%s/records?page=%d&perPage=%d",
+			s.pb.baseURL, s.collection, page, perPage)
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.pb.token)
+
+		resp, err := s.pb.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("[STATS:%s] load failed: %w", s.label, err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body := make([]byte, 512)
+			n, _ := resp.Body.Read(body)
+			resp.Body.Close()
+			return fmt.Errorf("[STATS:%s] %s returned HTTP %d: %s", s.label, s.collection, resp.StatusCode, string(body[:n]))
+		}
+
+		var result struct {
+			Items      []CachedScriptStat `json:"items"`
+			TotalItems int                `json:"totalItems"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return err
+		}
+		resp.Body.Close()
+
+		for i := range result.Items {
+			item := result.Items[i]
+			s.stats[item.Slug] = &item
+		}
+
+		if len(s.stats) >= result.TotalItems || len(result.Items) == 0 {
+			break
+		}
+		page++
+	}
+
+	log.Printf("[STATS:%s] Loaded %d script stats from %s", s.label, len(s.stats), s.collection)
+	return nil
+}
+
+// IsEmpty returns true if no stats are loaded
+func (s *ScriptStatsStore) IsEmpty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.stats) == 0
+}
+
+// GetLastDate returns the most recent last_date across all stats
+func (s *ScriptStatsStore) GetLastDate() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	best := ""
+	for _, st := range s.stats {
+		if st.LastDate > best {
+			best = st.LastDate
+		}
+	}
+	return best
+}
+
+// reclassifyRecord applies status reclassification rules
+func reclassifyRecord(r *TelemetryRecord) {
+	if r.Status == "failed" && (r.ExitCode == 130 ||
+		strings.Contains(strings.ToLower(r.Error), "sigint") ||
+		strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
+		strings.Contains(strings.ToLower(r.Error), "aborted by user")) {
+		r.Status = "aborted"
+	}
+	if r.Status == "failed" && r.ExitCode == 0 && (r.Error == "" || strings.ToLower(r.Error) == "success") {
+		r.Status = "success"
+	}
+}
+
+// aggregateRecords aggregates telemetry records into per-script stats
+func aggregateRecords(records []TelemetryRecord, knownScripts map[string]ScriptInfo) map[string]*CachedScriptStat {
+	agg := make(map[string]*CachedScriptStat)
+	for i := range records {
+		r := &records[i]
+		if knownScripts != nil {
+			if _, ok := knownScripts[r.NSAPP]; !ok {
+				continue
+			}
+		}
+		reclassifyRecord(r)
+		st := agg[r.NSAPP]
+		if st == nil {
+			st = &CachedScriptStat{Slug: r.NSAPP, Type: r.Type}
+			agg[r.NSAPP] = st
+		}
+		st.Total++
+		switch r.Status {
+		case "success":
+			st.Success++
+		case "failed":
+			st.Failed++
+		case "aborted":
+			st.Aborted++
+		case "installing":
+			st.Installing++
+		}
+	}
+	return agg
+}
+
+// Rebuild fetches records for the last windowDays and replaces all stats (for 7d/30d)
+func (s *ScriptStatsStore) Rebuild(ctx context.Context, repoSource string) error {
+	if s.windowDays <= 0 {
+		return fmt.Errorf("Rebuild only works for windowed stores (windowDays > 0)")
+	}
+
+	log.Printf("[STATS:%s] Rebuilding from last %d days of telemetry...", s.label, s.windowDays)
+
+	if err := s.pb.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	since := time.Now().AddDate(0, 0, -s.windowDays).Format("2006-01-02")
+	var filterParts []string
+	filterParts = append(filterParts, fmt.Sprintf("created >= '%s 00:00:00'", since))
+	if repoSource != "" {
+		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+	}
+	filter := url.QueryEscape(strings.Join(filterParts, " && "))
+
+	result, err := s.pb.fetchRecords(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("[STATS:%s] rebuild fetch failed: %w", s.label, err)
+	}
+
+	knownScripts, _ := s.pb.FetchKnownScripts(ctx)
+	agg := aggregateRecords(result.Records, knownScripts)
+	today := time.Now().Format("2006-01-02")
+
+	s.mu.Lock()
+	// Reset existing stats to 0 but keep PB record IDs
+	for _, st := range s.stats {
+		st.Total, st.Success, st.Failed, st.Aborted, st.Installing = 0, 0, 0, 0, 0
+	}
+	// Apply new aggregation
+	for slug, fresh := range agg {
+		if existing, ok := s.stats[slug]; ok {
+			existing.Total = fresh.Total
+			existing.Success = fresh.Success
+			existing.Failed = fresh.Failed
+			existing.Aborted = fresh.Aborted
+			existing.Installing = fresh.Installing
+			existing.Type = fresh.Type
+			existing.LastDate = today
+		} else {
+			fresh.LastDate = today
+			s.stats[slug] = fresh
+		}
+	}
+	// Update last_date for all
+	for _, st := range s.stats {
+		st.LastDate = today
+	}
+	s.mu.Unlock()
+
+	if err := s.writeAllToPB(ctx); err != nil {
+		return err
+	}
+
+	log.Printf("[STATS:%s] Rebuild complete: %d scripts from %d records", s.label, len(agg), len(result.Records))
+	return nil
+}
+
+// Bootstrap does a full aggregation (all-time, no date filter) — first run only
+func (s *ScriptStatsStore) Bootstrap(ctx context.Context, repoSource string) error {
+	log.Printf("[STATS:%s] Bootstrap: loading ALL telemetry records (this may take a while)...", s.label)
+
+	if err := s.pb.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	var filterParts []string
+	if repoSource != "" {
+		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+	}
+	var filter string
+	if len(filterParts) > 0 {
+		filter = url.QueryEscape(strings.Join(filterParts, " && "))
+	}
+
+	result, err := s.pb.fetchRecords(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("[STATS:%s] bootstrap fetch failed: %w", s.label, err)
+	}
+
+	knownScripts, _ := s.pb.FetchKnownScripts(ctx)
+	agg := aggregateRecords(result.Records, knownScripts)
+	today := time.Now().Format("2006-01-02")
+
+	s.mu.Lock()
+	s.stats = make(map[string]*CachedScriptStat)
+	for slug, st := range agg {
+		st.LastDate = today
+		s.stats[slug] = st
+	}
+	s.mu.Unlock()
+
+	if err := s.writeAllToPB(ctx); err != nil {
+		return err
+	}
+
+	log.Printf("[STATS:%s] Bootstrap complete: %d scripts aggregated from %d records", s.label, len(agg), len(result.Records))
+	return nil
+}
+
+// IncrementalUpdate fetches records since lastDate and adds counts (all-time only)
+func (s *ScriptStatsStore) IncrementalUpdate(ctx context.Context, repoSource string) error {
+	lastDate := s.GetLastDate()
+	if lastDate == "" {
+		return s.Bootstrap(ctx, repoSource)
+	}
+
+	log.Printf("[STATS:%s] Incremental update since %s...", s.label, lastDate)
+
+	if err := s.pb.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	var filterParts []string
+	filterParts = append(filterParts, fmt.Sprintf("created >= '%s 00:00:00'", lastDate))
+	if repoSource != "" {
+		filterParts = append(filterParts, fmt.Sprintf("repo_source = '%s'", repoSource))
+	}
+	filter := url.QueryEscape(strings.Join(filterParts, " && "))
+
+	result, err := s.pb.fetchRecords(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("[STATS:%s] incremental fetch failed: %w", s.label, err)
+	}
+
+	knownScripts, _ := s.pb.FetchKnownScripts(ctx)
+	today := time.Now().Format("2006-01-02")
+
+	s.mu.Lock()
+	added := 0
+	for i := range result.Records {
+		r := &result.Records[i]
+
+		if knownScripts != nil {
+			if _, ok := knownScripts[r.NSAPP]; !ok {
+				continue
+			}
+		}
+
+		reclassifyRecord(r)
+
+		st := s.stats[r.NSAPP]
+		if st == nil {
+			st = &CachedScriptStat{Slug: r.NSAPP, Type: r.Type}
+			s.stats[r.NSAPP] = st
+		}
+		st.Total++
+		switch r.Status {
+		case "success":
+			st.Success++
+		case "failed":
+			st.Failed++
+		case "aborted":
+			st.Aborted++
+		case "installing":
+			st.Installing++
+		}
+		added++
+	}
+	for _, st := range s.stats {
+		st.LastDate = today
+	}
+	s.mu.Unlock()
+
+	if err := s.writeAllToPB(ctx); err != nil {
+		return err
+	}
+
+	log.Printf("[STATS:%s] Incremental update complete: %d new records, %d scripts total", s.label, added, len(s.stats))
+	return nil
+}
+
+// Update dispatches to Rebuild (windowed) or IncrementalUpdate (all-time)
+func (s *ScriptStatsStore) Update(ctx context.Context, repoSource string) error {
+	if s.windowDays > 0 {
+		return s.Rebuild(ctx, repoSource)
+	}
+	return s.IncrementalUpdate(ctx, repoSource)
+}
+
+// writeAllToPB upserts all stats to the collection
+func (s *ScriptStatsStore) writeAllToPB(ctx context.Context) error {
+	if err := s.pb.ensureAuth(ctx); err != nil {
+		return err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	written := 0
+	for _, st := range s.stats {
+		body, _ := json.Marshal(st)
+
+		var reqURL string
+		var method string
+		if st.ID != "" {
+			reqURL = fmt.Sprintf("%s/api/collections/%s/records/%s", s.pb.baseURL, s.collection, st.ID)
+			method = http.MethodPatch
+		} else {
+			reqURL = fmt.Sprintf("%s/api/collections/%s/records", s.pb.baseURL, s.collection)
+			method = http.MethodPost
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, reqURL, strings.NewReader(string(body)))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+s.pb.token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.pb.http.Do(req)
+		if err != nil {
+			return fmt.Errorf("[STATS:%s] write %s failed: %w", s.label, st.Slug, err)
+		}
+
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated || resp.StatusCode == 204 {
+			if method == http.MethodPost {
+				var created struct{ ID string `json:"id"` }
+				json.NewDecoder(resp.Body).Decode(&created)
+				st.ID = created.ID
+			}
+			resp.Body.Close()
+			written++
+		} else {
+			errBody := make([]byte, 512)
+			n, _ := resp.Body.Read(errBody)
+			resp.Body.Close()
+			return fmt.Errorf("[STATS:%s] write %s returned HTTP %d: %s", s.label, st.Slug, resp.StatusCode, string(errBody[:n]))
+		}
+	}
+
+	log.Printf("[STATS:%s] Wrote %d stats to %s", s.label, written, s.collection)
+	return nil
+}
+
+// BuildData constructs ScriptAnalysisData from the persistent store
+func (s *ScriptStatsStore) BuildData(knownScripts map[string]ScriptInfo) *ScriptAnalysisData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data := &ScriptAnalysisData{}
+	now := time.Now()
+	seen := make(map[string]bool)
+
+	for _, st := range s.stats {
+		if st.Total == 0 {
+			continue // skip zeroed-out stats from previous windows
+		}
+		seen[st.Slug] = true
+		rate := float64(0)
+		completed := st.Success + st.Failed + st.Aborted
+		if completed > 0 {
+			rate = float64(st.Success) / float64(completed) * 100
+		}
+		daysOld := 0
+		installsPerDay := float64(0)
+		if knownScripts != nil {
+			if info, ok := knownScripts[st.Slug]; ok && !info.Created.IsZero() {
+				daysOld = int(now.Sub(info.Created).Hours() / 24)
+				if daysOld < 1 {
+					daysOld = 1
+				}
+				installsPerDay = float64(st.Total) / float64(daysOld)
+			}
+		}
+		typ := st.Type
+		if knownScripts != nil {
+			if info, ok := knownScripts[st.Slug]; ok {
+				typ = info.Type
+			}
+		}
+		data.TopScripts = append(data.TopScripts, ScriptStat{
+			App:            st.Slug,
+			Type:           typ,
+			Total:          st.Total,
+			Success:        st.Success,
+			Failed:         st.Failed,
+			Aborted:        st.Aborted,
+			Installing:     st.Installing,
+			SuccessRate:    rate,
+			DaysOld:        daysOld,
+			InstallsPerDay: installsPerDay,
+		})
+		data.TotalInstalls += st.Total
+	}
+
+	// Add zero-usage scripts (only for 30d and alltime)
+	if knownScripts != nil && (s.windowDays >= 30 || s.windowDays == 0) {
+		for slug, info := range knownScripts {
+			if !seen[slug] {
+				daysOld := 0
+				if !info.Created.IsZero() {
+					daysOld = int(now.Sub(info.Created).Hours() / 24)
+					if daysOld < 1 {
+						daysOld = 1
+					}
+				}
+				data.TopScripts = append(data.TopScripts, ScriptStat{
+					App:     slug,
+					Type:    info.Type,
+					DaysOld: daysOld,
+				})
+			}
+		}
+	}
+
+	data.TotalScripts = len(data.TopScripts)
+
+	// Sort by total desc
+	for i := 0; i < len(data.TopScripts); i++ {
+		for j := i + 1; j < len(data.TopScripts); j++ {
+			if data.TopScripts[j].Total > data.TopScripts[i].Total {
+				data.TopScripts[i], data.TopScripts[j] = data.TopScripts[j], data.TopScripts[i]
+			}
+		}
+	}
+
+	return data
 }
 
 // FetchScriptAnalysisData retrieves script usage statistics
@@ -5111,7 +5603,7 @@ func ErrorAnalysisHTML() string {
                     alert.innerHTML = '✅ Issue created! <a href="' + data.issue_url + '" target="_blank" style="color:var(--accent-green);">View on GitHub →</a>';
                     alert.style.display = 'block';
                 } else {
-                    throw new Error(data.message || resp.statusText || 'Failed');
+                    throw new Error(data.error || data.message || resp.statusText || 'Failed');
                 }
             } catch (e) {
                 alert.className = 'alert-box error';
