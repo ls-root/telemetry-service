@@ -341,7 +341,8 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=130 || error~'SIGINT' || error~'Ctrl+C' || error~'Ctrl-C')))")
 		} else if status == "failed" {
 			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
-			filters = append(filters, "(status='failed' && exit_code!=130 && !(error~'SIGINT') && !(error~'Ctrl+C') && !(error~'Ctrl-C'))")
+			// PocketBase negation uses !~ operator, not !(field~value)
+			filters = append(filters, "(status='failed' && exit_code!=130 && error!~'SIGINT' && error!~'Ctrl+C' && error!~'Ctrl-C')")
 		} else {
 			filters = append(filters, fmt.Sprintf("status='%s'", status))
 		}

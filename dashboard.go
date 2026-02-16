@@ -2130,79 +2130,115 @@ func DashboardHTML() string {
             font-weight: 600;
         }
         
+        /* Error Analysis Combined Section */
+        .error-analysis-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            padding: 0 24px 24px;
+        }
+        @media (max-width: 900px) {
+            .error-analysis-grid { grid-template-columns: 1fr; }
+        }
+        .error-analysis-col {
+            min-width: 0;
+        }
+        .error-analysis-subtitle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 0 0 12px 0;
+            padding: 0;
+        }
+        
         .failed-apps-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 12px;
-            margin-top: 12px;
+            grid-template-columns: 1fr;
+            gap: 8px;
         }
-        
         .failed-app-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
             background: var(--bg-tertiary);
-            border-radius: 6px;
-            padding: 12px;
+            border-radius: 8px;
+            padding: 10px 14px;
+            transition: background 0.15s;
         }
-        
+        .failed-app-card:hover {
+            background: var(--bg-secondary);
+        }
+        .failed-app-card .app-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
         .failed-app-card .app-name {
             font-weight: 600;
-            margin-bottom: 4px;
+            font-size: 13px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        
-        .failed-app-card .failure-rate {
-            font-size: 20px;
-            font-weight: 600;
-            color: var(--accent-red);
-        }
-        
         .failed-app-card .details {
             font-size: 11px;
             color: var(--text-secondary);
+            white-space: nowrap;
         }
-        
+        .failed-app-card .failure-rate {
+            font-size: 15px;
+            font-weight: 700;
+            white-space: nowrap;
+            padding-left: 12px;
+        }
+        .failed-app-card .failure-rate.critical { color: var(--accent-red); }
+        .failed-app-card .failure-rate.warning { color: var(--accent-orange); }
+        .failed-app-card .failure-rate.moderate { color: var(--accent-yellow, #eab308); }
         .failed-app-card .type-badge {
             font-size: 10px;
             padding: 2px 6px;
-            margin-right: 4px;
             vertical-align: middle;
+            flex-shrink: 0;
         }
         
         /* Error Analysis List */
         .error-list {
-            padding: 16px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
-        
         .error-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 14px 16px;
+            padding: 10px 14px;
             background: var(--bg-tertiary);
             border-radius: 8px;
-            margin-bottom: 8px;
+            transition: background 0.15s;
         }
-        
-        .error-item:last-child {
-            margin-bottom: 0;
+        .error-item:hover {
+            background: var(--bg-secondary);
         }
-        
         .error-item .pattern {
             font-weight: 600;
-            font-size: 14px;
+            font-size: 13px;
             color: var(--accent-red);
-            margin-bottom: 4px;
+            margin-bottom: 2px;
         }
-        
         .error-item .meta {
-            font-size: 12px;
+            font-size: 11px;
             color: var(--text-secondary);
         }
-        
         .count-badge {
-            background: rgba(239, 68, 68, 0.15);
+            background: rgba(239, 68, 68, 0.12);
             color: var(--accent-red);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 13px;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 12px;
             font-weight: 600;
             white-space: nowrap;
         }
@@ -2558,7 +2594,6 @@ func DashboardHTML() string {
             <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
                 <span id="themeIcon">🌙</span>
             </button>
-            <a href="/error-analysis" class="nav-icon" title="Error Analysis" style="font-size:14px;font-weight:500;color:var(--text-secondary);text-decoration:none;padding:6px 12px;border-radius:8px;border:1px solid var(--border-color);">🔍 Errors</a>
         </div>
     </nav>
     
@@ -2765,29 +2800,42 @@ func DashboardHTML() string {
             </div>
         </div>
         
-        <!-- Error Analysis Section -->
+        <!-- Error Analysis Section (combined) -->
         <div class="section-card">
             <div class="section-header">
                 <div>
                     <h2>Error Analysis</h2>
-                    <p>Common error patterns and affected applications.</p>
+                    <p>Error patterns, failure rates, and applications that need attention. <span id="failedAppsThreshold" style="color: var(--text-muted); font-size: 12px;"></span></p>
+                </div>
+                <div class="section-actions">
+                    <a href="/error-analysis" class="btn" style="text-decoration:none;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"/>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                        Deep Analysis
+                    </a>
                 </div>
             </div>
-            <div class="error-list" id="errorList">
-                <div class="loading"><div class="loading-spinner"></div>Loading...</div>
-            </div>
-        </div>
-        
-        <!-- Failed Apps Section -->
-        <div class="section-card">
-            <div class="section-header">
-                <div>
-                    <h2>Apps with Highest Failure Rates</h2>
-                    <p>Applications that need attention <span id="failedAppsThreshold" style="color: var(--text-muted); font-size: 12px;"></span></p>
+            <div class="error-analysis-grid">
+                <div class="error-analysis-col">
+                    <h3 class="error-analysis-subtitle">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-red)" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                        Common Error Patterns
+                    </h3>
+                    <div class="error-list" id="errorList">
+                        <div class="loading"><div class="loading-spinner"></div>Loading...</div>
+                    </div>
                 </div>
-            </div>
-            <div class="failed-apps-grid" id="failedAppsGrid">
-                <div class="loading"><div class="loading-spinner"></div>Loading...</div>
+                <div class="error-analysis-col">
+                    <h3 class="error-analysis-subtitle">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-orange)" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        Highest Failure Rates
+                    </h3>
+                    <div class="failed-apps-grid" id="failedAppsGrid">
+                        <div class="loading"><div class="loading-spinner"></div>Loading...</div>
+                    </div>
+                </div>
             </div>
         </div>
         
@@ -3075,25 +3123,22 @@ func DashboardHTML() string {
         function updateErrorAnalysis(errors) {
             const container = document.getElementById('errorList');
             if (!errors || errors.length === 0) {
-                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No errors recorded</div>';
+                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center; font-size: 13px;">No errors recorded</div>';
                 return;
             }
-            
-            container.innerHTML = errors.slice(0, 8).map(e => 
+            container.innerHTML = errors.slice(0, 6).map(e => 
                 '<div class="error-item">' +
-                    '<div>' +
+                    '<div style="min-width:0;flex:1;">' +
                         '<div class="pattern">' + escapeHtml(e.pattern) + '</div>' +
-                        '<div class="meta">' + e.unique_apps + ' apps affected: ' + escapeHtml(e.apps) + '</div>' +
+                        '<div class="meta">' + e.unique_apps + ' app' + (e.unique_apps !== 1 ? 's' : '') + ' affected</div>' +
                     '</div>' +
-                    '<span class="count-badge">' + e.count.toLocaleString() + ' occurrences</span>' +
+                    '<span class="count-badge">' + e.count.toLocaleString() + 'x</span>' +
                 '</div>'
             ).join('');
         }
         
         function updateFailedApps(apps) {
             const container = document.getElementById('failedAppsGrid');
-            
-            // Update threshold info based on active period
             const activeDays = parseInt(document.querySelector('.filter-btn.active')?.dataset.days || '1');
             let minInstalls = 10;
             if (activeDays <= 1) minInstalls = 5;
@@ -3101,22 +3146,21 @@ func DashboardHTML() string {
             else if (activeDays <= 30) minInstalls = 40;
             else if (activeDays <= 90) minInstalls = 100;
             else minInstalls = 100;
-            
-            document.getElementById('failedAppsThreshold').textContent = '(min. ' + minInstalls + ' installs required)';
-            
+            document.getElementById('failedAppsThreshold').textContent = '(min. ' + minInstalls + ' installs)';
             if (!apps || apps.length === 0) {
-                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center;">No apps with enough data (minimum ' + minInstalls + ' installations required)</div>';
+                container.innerHTML = '<div style="padding: 20px; color: var(--text-muted); text-align: center; font-size: 13px;">Not enough data (min. ' + minInstalls + ' installs)</div>';
                 return;
             }
-            
-            // Show all apps (balanced: LXC first, then VMs)
-            container.innerHTML = apps.map(a => {
+            container.innerHTML = apps.slice(0, 8).map(a => {
                 const typeClass = (a.type || '').toLowerCase();
-                const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span> ' : '';
+                const typeBadge = a.type && a.type !== 'unknown' ? '<span class="type-badge ' + typeClass + '">' + a.type.toUpperCase() + '</span>' : '';
+                const rate = a.failure_rate;
+                const severityClass = rate >= 30 ? 'critical' : rate >= 15 ? 'warning' : 'moderate';
                 return '<div class="failed-app-card">' +
-                    '<div class="app-name">' + typeBadge + escapeHtml(a.app) + '</div>' +
-                    '<div class="failure-rate">' + a.failure_rate.toFixed(1) + '%</div>' +
-                    '<div class="details">' + a.failed_count + ' / ' + a.total_count + ' failed</div>' +
+                    '<div class="app-info">' + typeBadge + '<span class="app-name">' + escapeHtml(a.app) + '</span>' +
+                        '<span class="details">' + a.failed_count + '/' + a.total_count + '</span>' +
+                    '</div>' +
+                    '<span class="failure-rate ' + severityClass + '">' + rate.toFixed(1) + '%</span>' +
                 '</div>';
             }).join('');
         }
