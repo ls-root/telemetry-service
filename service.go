@@ -925,6 +925,10 @@ func main() {
 		AdminPassword: env("ADMIN_PASSWORD", ""),
 	}
 
+	// Debug: log whether critical env vars are set (not the values!)
+	log.Printf("CONFIG: ADMIN_PASSWORD set=%v (len=%d), GITHUB_TOKEN set=%v, GITHUB_OWNER=%s, GITHUB_REPO=%s",
+		cfg.AdminPassword != "", len(cfg.AdminPassword), cfg.GitHubToken != "", cfg.GitHubOwner, cfg.GitHubRepo)
+
 	var pt *ProxyTrust
 	if strings.TrimSpace(env("TRUSTED_PROXIES_CIDR", "")) != "" {
 		p, err := NewProxyTrust(cfg.TrustedProxiesCIDR)
