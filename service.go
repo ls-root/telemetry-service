@@ -1690,20 +1690,33 @@ func main() {
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 
-	// Background cache warmup job - pre-populates cache for common dashboard queries
+	// Background cache warmup job
+	// - On startup: full warmup (dashboard + scripts + errors, all day ranges)
+	// - Every 15 min: refresh "today" data only (fast, changes frequently)
+	// - Nightly at 02:00 UTC: full warmup with 23h TTL (data barely changes intra-day)
 	if cfg.CacheEnabled {
 		go func() {
-			// Initial warmup after startup
+			// Initial full warmup after startup
 			time.Sleep(10 * time.Second)
-			warmupDashboardCache(pb, cache, cfg)
-			
-			// Periodic refresh every 30 minutes (well within 1h TTL)
-			ticker := time.NewTicker(30 * time.Minute)
-			for range ticker.C {
-				warmupDashboardCache(pb, cache, cfg)
+			warmupCaches(pb, cache, cfg, false)
+
+			// Periodic "today" refresh every 15 min
+			todayTicker := time.NewTicker(15 * time.Minute)
+			// Nightly full refresh at 02:00 UTC
+			nightlyTimer := time.NewTimer(timeUntilNextUTC(2, 0))
+
+			for {
+				select {
+				case <-todayTicker.C:
+					warmupCaches(pb, cache, cfg, true)
+				case <-nightlyTimer.C:
+					log.Println("[CACHE] Nightly full warmup triggered")
+					warmupCaches(pb, cache, cfg, false)
+					nightlyTimer.Reset(24 * time.Hour)
+				}
 			}
 		}()
-		log.Printf("background cache warmup enabled (TTL=%v, refresh=30m)", cfg.CacheTTL)
+		log.Printf("background cache warmup enabled (nightly 02:00 UTC, today refresh every 15m)")
 	}
 
 	log.Printf("telemetry-ingest listening on %s", cfg.ListenAddr)
@@ -1847,50 +1860,108 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// warmupDashboardCache pre-populates the cache with common dashboard queries
-// Always refreshes all entries regardless of current cache state
-func warmupDashboardCache(pb *PBClient, cache *Cache, cfg Config) {
-	log.Println("[CACHE] Starting dashboard cache warmup...")
+// timeUntilNextUTC calculates the duration until the next occurrence of hour:minute UTC
+func timeUntilNextUTC(hour, minute int) time.Duration {
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
+	if now.After(next) {
+		next = next.Add(24 * time.Hour)
+	}
+	return time.Until(next)
+}
+
+// warmupCaches pre-populates the cache for dashboard, scripts, AND errors endpoints.
+// If todayOnly=true, only warms days=1 (fast refresh for current-day data).
+// If todayOnly=false, warms all day ranges with long TTLs (nightly/startup).
+func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
+	label := "full"
+	if todayOnly {
+		label = "today-only"
+	}
+	log.Printf("[CACHE] Starting %s cache warmup...", label)
 	start := time.Now()
-	
-	// Common day ranges and repos to pre-cache
+
 	dayRanges := []int{1, 7, 30, 90, 365}
-	repos := []string{"ProxmoxVE", "ProxmoxVED", ""}  // ProxmoxVE, ProxmoxVED, and "all"
-	
+	if todayOnly {
+		dayRanges = []int{1}
+	}
+	repos := []string{"ProxmoxVE", "ProxmoxVED", ""} // ProxmoxVE, ProxmoxVED, and "all"
+
 	warmed := 0
 	failed := 0
+
 	for _, days := range dayRanges {
+		// Today: short TTL (changes with every install)
+		// Non-today: 23h TTL (survives until next nightly run)
+		cacheTTL := 2 * time.Minute
+		if days > 1 {
+			cacheTTL = 23 * time.Hour
+		}
+
+		// Scale timeout by data volume
+		timeout := 180 * time.Second
+		if days >= 365 {
+			timeout = 600 * time.Second
+		} else if days >= 90 {
+			timeout = 300 * time.Second
+		}
+
 		for _, repo := range repos {
-			cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
-
-			// Always refresh - don't skip cached entries
-			if !cache.TryStartRefresh(cacheKey) {
-				continue // Another goroutine is already refreshing this key
+			// --- Dashboard ---
+			{
+				cacheKey := fmt.Sprintf("dashboard:%d:%s", days, repo)
+				if cache.TryStartRefresh(cacheKey) {
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					data, err := pb.FetchDashboardData(ctx, days, repo)
+					cancel()
+					cache.FinishRefresh(cacheKey)
+					if err != nil {
+						log.Printf("[CACHE] Warmup dashboard failed days=%d repo=%q: %v", days, repo, err)
+						failed++
+					} else {
+						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
+						warmed++
+					}
+				}
 			}
 
-			// Scale timeout by data volume: larger ranges need more time
-			timeout := 180 * time.Second
-			if days >= 365 {
-				timeout = 600 * time.Second // 10 minutes for full year
-			} else if days >= 90 {
-				timeout = 300 * time.Second // 5 minutes for 90 days
+			// --- Scripts ---
+			{
+				cacheKey := fmt.Sprintf("scripts:%d:%s", days, repo)
+				if cache.TryStartRefresh(cacheKey) {
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					data, err := pb.FetchScriptAnalysisData(ctx, days, repo)
+					cancel()
+					cache.FinishRefresh(cacheKey)
+					if err != nil {
+						log.Printf("[CACHE] Warmup scripts failed days=%d repo=%q: %v", days, repo, err)
+						failed++
+					} else {
+						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
+						warmed++
+					}
+				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			data, err := pb.FetchDashboardData(ctx, days, repo)
-			cancel()
-			cache.FinishRefresh(cacheKey)
-			
-			if err != nil {
-				log.Printf("[CACHE] Warmup failed for days=%d repo=%s: %v", days, repo, err)
-				failed++
-				continue
+
+			// --- Errors ---
+			{
+				cacheKey := fmt.Sprintf("errors:%d:%s", days, repo)
+				if cache.TryStartRefresh(cacheKey) {
+					ctx, cancel := context.WithTimeout(context.Background(), timeout)
+					data, err := pb.FetchErrorAnalysisData(ctx, days, repo)
+					cancel()
+					cache.FinishRefresh(cacheKey)
+					if err != nil {
+						log.Printf("[CACHE] Warmup errors failed days=%d repo=%q: %v", days, repo, err)
+						failed++
+					} else {
+						_ = cache.Set(context.Background(), cacheKey, data, cacheTTL)
+						warmed++
+					}
+				}
 			}
-			
-			_ = cache.Set(context.Background(), cacheKey, data, cfg.CacheTTL)
-			warmed++
-			log.Printf("[CACHE] Warmed days=%d repo=%q (%d records)", days, repo, data.TotalInstalls)
 		}
 	}
-	
-	log.Printf("[CACHE] Warmup complete: %d refreshed, %d failed (took %v)", warmed, failed, time.Since(start).Round(time.Second))
+
+	log.Printf("[CACHE] Warmup %s complete: %d warmed, %d failed (took %v)", label, warmed, failed, time.Since(start).Round(time.Second))
 }
