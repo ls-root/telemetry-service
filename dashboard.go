@@ -197,7 +197,14 @@ func (p *PBClient) FetchKnownScriptSlugs(ctx context.Context) (map[string]bool, 
 
 		resp, err := p.http.Do(req)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("HTTP request to script_scripts failed: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body := make([]byte, 512)
+			n, _ := resp.Body.Read(body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("script_scripts returned HTTP %d: %s", resp.StatusCode, string(body[:n]))
 		}
 
 		var result struct {
@@ -264,8 +271,10 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	// Fetch known scripts from script_scripts to filter against
 	knownSlugs, err := p.FetchKnownScriptSlugs(ctx)
 	if err != nil {
-		log.Printf("[WARN] could not fetch known script slugs, showing all: %v", err)
-		knownSlugs = nil // graceful degradation: show all if DB unavailable
+		log.Printf("[ERROR] could not fetch known script slugs: %v — script filter will not be applied", err)
+		knownSlugs = nil
+	} else {
+		log.Printf("[INFO] loaded %d known script slugs for filtering", len(knownSlugs))
 	}
 
 	var filterParts []string
