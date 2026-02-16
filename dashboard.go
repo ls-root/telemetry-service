@@ -175,10 +175,11 @@ type ErrorTimelinePoint struct {
 // Script Analysis Data Types
 // ========================================================
 
-// ScriptInfo holds slug and type for known scripts
+// ScriptInfo holds slug, type, and creation date for known scripts
 type ScriptInfo struct {
-	Slug string
-	Type string // "ct", "vm", "pve", "addon", "turnkey"
+	Slug    string
+	Type    string // "ct", "vm", "pve", "addon", "turnkey"
+	Created time.Time
 }
 
 // type relation ID -> display type mapping
@@ -201,7 +202,7 @@ func (p *PBClient) FetchKnownScripts(ctx context.Context) (map[string]ScriptInfo
 	perPage := 500
 
 	for {
-		reqURL := fmt.Sprintf("%s/api/collections/script_scripts/records?fields=slug,type&page=%d&perPage=%d",
+		reqURL := fmt.Sprintf("%s/api/collections/script_scripts/records?fields=slug,type,script_created&page=%d&perPage=%d",
 			p.baseURL, page, perPage)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -224,8 +225,9 @@ func (p *PBClient) FetchKnownScripts(ctx context.Context) (map[string]ScriptInfo
 
 		var result struct {
 			Items []struct {
-				Slug string `json:"slug"`
-				Type string `json:"type"`
+				Slug          string `json:"slug"`
+				Type          string `json:"type"`
+				ScriptCreated string `json:"script_created"`
 			} `json:"items"`
 			TotalItems int `json:"totalItems"`
 		}
@@ -241,7 +243,15 @@ func (p *PBClient) FetchKnownScripts(ctx context.Context) (map[string]ScriptInfo
 				if displayType == "" {
 					displayType = item.Type
 				}
-				scripts[item.Slug] = ScriptInfo{Slug: item.Slug, Type: displayType}
+				created := time.Time{}
+				if item.ScriptCreated != "" {
+					if t, err := time.Parse("2006-01-02 15:04:05.000Z", item.ScriptCreated); err == nil {
+						created = t
+					} else if t, err := time.Parse("2006-01-02", item.ScriptCreated[:10]); err == nil {
+						created = t
+					}
+				}
+				scripts[item.Slug] = ScriptInfo{Slug: item.Slug, Type: displayType, Created: created}
 			}
 		}
 
@@ -262,14 +272,16 @@ type ScriptAnalysisData struct {
 }
 
 type ScriptStat struct {
-	App          string  `json:"app"`
-	Type         string  `json:"type"`
-	Total        int     `json:"total"`
-	Success      int     `json:"success"`
-	Failed       int     `json:"failed"`
-	Aborted      int     `json:"aborted"`
-	Installing   int     `json:"installing"`
-	SuccessRate  float64 `json:"success_rate"`
+	App            string  `json:"app"`
+	Type           string  `json:"type"`
+	Total          int     `json:"total"`
+	Success        int     `json:"success"`
+	Failed         int     `json:"failed"`
+	Aborted        int     `json:"aborted"`
+	Installing     int     `json:"installing"`
+	SuccessRate    float64 `json:"success_rate"`
+	DaysOld        int     `json:"days_old"`
+	InstallsPerDay float64 `json:"installs_per_day"`
 }
 
 type RecentScript struct {
@@ -405,21 +417,35 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	data.TotalScripts = len(uniqueApps)
 
 	// Build sorted script stats (by total desc)
+	now := time.Now()
 	for _, a := range appStats {
 		rate := float64(0)
 		completed := a.success + a.failed + a.aborted
 		if completed > 0 {
 			rate = float64(a.success) / float64(completed) * 100
 		}
+		daysOld := 0
+		installsPerDay := float64(0)
+		if knownScripts != nil {
+			if info, ok := knownScripts[a.app]; ok && !info.Created.IsZero() {
+				daysOld = int(now.Sub(info.Created).Hours() / 24)
+				if daysOld < 1 {
+					daysOld = 1
+				}
+				installsPerDay = float64(a.total) / float64(daysOld)
+			}
+		}
 		data.TopScripts = append(data.TopScripts, ScriptStat{
-			App:         a.app,
-			Type:        a.typ,
-			Total:       a.total,
-			Success:     a.success,
-			Failed:      a.failed,
-			Aborted:     a.aborted,
-			Installing:  a.installing,
-			SuccessRate: rate,
+			App:            a.app,
+			Type:           a.typ,
+			Total:          a.total,
+			Success:        a.success,
+			Failed:         a.failed,
+			Aborted:        a.aborted,
+			Installing:     a.installing,
+			SuccessRate:    rate,
+			DaysOld:        daysOld,
+			InstallsPerDay: installsPerDay,
 		})
 	}
 
@@ -427,15 +453,24 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	if knownScripts != nil && (days == 0 || days >= 30) {
 		for slug, info := range knownScripts {
 			if !uniqueApps[slug] {
+				daysOld := 0
+				if !info.Created.IsZero() {
+					daysOld = int(now.Sub(info.Created).Hours() / 24)
+					if daysOld < 1 {
+						daysOld = 1
+					}
+				}
 				data.TopScripts = append(data.TopScripts, ScriptStat{
-					App:         slug,
-					Type:        info.Type,
-					Total:       0,
-					Success:     0,
-					Failed:      0,
-					Aborted:     0,
-					Installing:  0,
-					SuccessRate: 0,
+					App:            slug,
+					Type:           info.Type,
+					Total:          0,
+					Success:        0,
+					Failed:         0,
+					Aborted:        0,
+					Installing:     0,
+					SuccessRate:    0,
+					DaysOld:        daysOld,
+					InstallsPerDay: 0,
 				})
 				data.TotalScripts++
 			}
@@ -5318,6 +5353,7 @@ func ScriptAnalysisHTML() string {
                             <th>Aborted</th>
                             <th>Installing</th>
                             <th>Success Rate</th>
+                            <th>Installs/Day</th>
                             <th style="min-width:100px;">Distribution</th>
                         </tr>
                     </thead>
@@ -5348,6 +5384,7 @@ func ScriptAnalysisHTML() string {
                             <th>Aborted</th>
                             <th>Installing</th>
                             <th>Success Rate</th>
+                            <th>Installs/Day</th>
                             <th style="min-width:100px;">Distribution</th>
                         </tr>
                     </thead>
@@ -5425,7 +5462,7 @@ func ScriptAnalysisHTML() string {
         function renderTopTable() {
             const tbody = document.getElementById('topTableBody');
             if (!currentData || !currentData.top_scripts) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
                 return;
             }
             const search = (document.getElementById('searchTop').value || '').toLowerCase();
@@ -5444,6 +5481,8 @@ func ScriptAnalysisHTML() string {
                 const pctFailed = total > 0 ? (s.failed / total * 100) : 0;
                 const pctAborted = total > 0 ? (s.aborted / total * 100) : 0;
                 const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
+                const ipd = (s.installs_per_day || 0).toFixed(2);
+                const ipdColor = s.installs_per_day >= 10 ? 'var(--accent-green)' : s.installs_per_day >= 1 ? 'var(--accent-cyan)' : 'var(--text-muted)';
                 return '<tr>' +
                     '<td style="color:var(--text-muted);font-weight:600;">' + (idx + 1) + '</td>' +
                     '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
@@ -5454,6 +5493,7 @@ func ScriptAnalysisHTML() string {
                     '<td style="color:var(--accent-purple);">' + s.aborted.toLocaleString() + '</td>' +
                     '<td style="color:var(--accent-yellow);">' + s.installing.toLocaleString() + '</td>' +
                     '<td style="color:' + rateColor + ';font-weight:600;">' + s.success_rate.toFixed(1) + '%</td>' +
+                    '<td style="color:' + ipdColor + ';font-weight:600;">' + ipd + '</td>' +
                     '<td><div class="success-bar">' +
                         '<div class="seg-success" style="width:' + pctSuccess + '%"></div>' +
                         '<div class="seg-failed" style="width:' + pctFailed + '%"></div>' +
@@ -5469,7 +5509,7 @@ func ScriptAnalysisHTML() string {
         function renderBottomTable() {
             const tbody = document.getElementById('bottomTableBody');
             if (!currentData || !currentData.top_scripts) {
-                tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:24px;">No data</td></tr>';
                 return;
             }
             const search = (document.getElementById('searchBottom').value || '').toLowerCase();
@@ -5490,6 +5530,8 @@ func ScriptAnalysisHTML() string {
                 const pctFailed = total > 0 ? (s.failed / total * 100) : 0;
                 const pctAborted = total > 0 ? (s.aborted / total * 100) : 0;
                 const pctInstalling = total > 0 ? (s.installing / total * 100) : 0;
+                const ipd = (s.installs_per_day || 0).toFixed(2);
+                const ipdColor = s.installs_per_day >= 10 ? 'var(--accent-green)' : s.installs_per_day >= 1 ? 'var(--accent-cyan)' : 'var(--text-muted)';
                 return '<tr>' +
                     '<td style="color:var(--text-muted);font-weight:600;">' + (totalScripts - idx) + '</td>' +
                     '<td><strong>' + escapeHtml(s.app) + '</strong></td>' +
@@ -5500,6 +5542,7 @@ func ScriptAnalysisHTML() string {
                     '<td style="color:var(--accent-purple);">' + s.aborted.toLocaleString() + '</td>' +
                     '<td style="color:var(--accent-yellow);">' + s.installing.toLocaleString() + '</td>' +
                     '<td style="color:' + rateColor + ';font-weight:600;">' + s.success_rate.toFixed(1) + '%</td>' +
+                    '<td style="color:' + ipdColor + ';font-weight:600;">' + ipd + '</td>' +
                     '<td><div class="success-bar">' +
                         '<div class="seg-success" style="width:' + pctSuccess + '%"></div>' +
                         '<div class="seg-failed" style="width:' + pctFailed + '%"></div>' +

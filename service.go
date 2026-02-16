@@ -1290,8 +1290,7 @@ func main() {
 							return
 						}
 						refreshTTL := 2 * time.Minute
-						if days > 7 { refreshTTL = 5 * time.Minute }
-						if days > 30 || days == 0 { refreshTTL = 15 * time.Minute }
+						if days > 7 { refreshTTL = 23 * time.Hour }
 						_ = cache.Set(context.Background(), cacheKey, freshData, refreshTTL)
 					}()
 				}
@@ -1312,10 +1311,8 @@ func main() {
 			switch {
 			case days <= 7:
 				cacheTTL = 2 * time.Minute
-			case days <= 30:
-				cacheTTL = 5 * time.Minute
 			default:
-				cacheTTL = 15 * time.Minute
+				cacheTTL = 23 * time.Hour
 			}
 			_ = cache.Set(ctx, cacheKey, data, cacheTTL)
 		}
@@ -1885,7 +1882,7 @@ func warmupCaches(pb *PBClient, cache *Cache, cfg Config, todayOnly bool) {
 	if todayOnly {
 		dayRanges = []int{1}
 	}
-	repos := []string{"ProxmoxVE", "ProxmoxVED", ""} // ProxmoxVE, ProxmoxVED, and "all"
+	repos := []string{"ProxmoxVE"} // Script Analysis only shows ProxmoxVE
 
 	warmed := 0
 	failed := 0
