@@ -113,7 +113,7 @@ func (c *Cleaner) findStuckInstallations(ctx context.Context) ([]StuckRecord, er
 	cutoffStr := cutoff.Format("2006-01-02 15:04:05")
 
 	// Build filter: status='installing' AND created < cutoff
-	filter := url.QueryEscape(fmt.Sprintf("status='installing' && created<'%s'", cutoffStr))
+	filter := url.QueryEscape(fmt.Sprintf("(status='installing' || status='configuring') && created<'%s'", cutoffStr))
 
 	var allRecords []StuckRecord
 	page := 1

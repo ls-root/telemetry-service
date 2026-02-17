@@ -607,7 +607,7 @@ var (
 	allowedType = map[string]bool{"lxc": true, "vm": true, "tool": true, "addon": true}
 
 	// Allowed values for 'status' field
-	allowedStatus = map[string]bool{"installing": true, "success": true, "failed": true, "aborted": true, "unknown": true}
+	allowedStatus = map[string]bool{"installing": true, "configuring": true, "success": true, "failed": true, "aborted": true, "unknown": true}
 
 	// Allowed values for 'os_type' field
 	allowedOsType = map[string]bool{
@@ -630,21 +630,42 @@ var (
 		"network": true, "storage": true, "dependency": true, "permission": true,
 		"timeout": true, "config": true, "resource": true, "unknown": true, "": true,
 		"user_aborted": true, "apt": true, "command_not_found": true, "signal": true,
+		"service": true, "database": true, "proxmox": true,
 	}
 
 	// exitCodeCategories maps well-known exit codes to error categories
 	exitCodeCategories = map[int]string{
 		1:   "unknown",           // General error
 		2:   "unknown",           // Misuse of shell builtins
-		100: "apt",               // APT: package manager error (broken packages / dependency problems)
-		126: "permission",        // Command invoked cannot execute (permission problem or not executable)
+		4:   "network",           // curl: Network/protocol error
+		5:   "network",           // curl: Could not resolve proxy
+		6:   "network",           // curl: Could not resolve host
+		7:   "network",           // curl: Connection refused
+		8:   "network",           // curl: FTP server reply error
+		10:  "config",            // Docker / privileged mode required
+		22:  "network",           // curl: HTTP error (404/500 etc.)
+		23:  "storage",           // curl: Write error (disk full?)
+		25:  "network",           // curl: Upload failed
+		28:  "timeout",           // curl: Connection timed out
+		35:  "network",           // SSL connect error
+		56:  "network",           // curl: Receive error (connection reset)
+		100: "apt",               // APT: package manager error
+		101: "apt",               // APT: Unmet dependencies
+		102: "apt",               // APT: Lock held by another process
+		124: "timeout",           // Command timed out
+		125: "config",            // Docker daemon error / container failed to run
+		126: "permission",        // Command invoked cannot execute
 		127: "command_not_found", // Command not found
 		128: "signal",            // Invalid argument to exit
+		129: "signal",            // Killed by SIGHUP (terminal closed)
 		130: "user_aborted",      // Script terminated by Ctrl+C (SIGINT)
+		131: "signal",            // Killed by SIGQUIT (core dump)
+		134: "signal",            // Process aborted (SIGABRT)
 		137: "resource",          // SIGKILL - often OOM killer
 		139: "unknown",           // SIGSEGV - segfault
-		141: "unknown",           // SIGPIPE
+		141: "signal",            // SIGPIPE
 		143: "signal",            // SIGTERM
+		255: "apt",               // DPKG: Fatal internal error
 	}
 
 	// exitCodeDescriptions provides human-readable exit code descriptions
@@ -652,15 +673,38 @@ var (
 		0:   "Success",
 		1:   "General error",
 		2:   "Misuse of shell builtins",
+		4:   "curl: Network/protocol error",
+		5:   "curl: Could not resolve proxy",
+		6:   "curl: DNS resolution failed",
+		7:   "curl: Connection refused",
+		8:   "curl: FTP server reply error",
+		10:  "Docker / privileged mode required (unsupported environment)",
+		22:  "curl: HTTP error (404/500 etc.)",
+		23:  "curl: Write error (disk full?)",
+		25:  "curl: Upload failed",
+		28:  "curl: Connection timed out",
+		30:  "curl: FTP port command failed",
+		35:  "SSL connect error",
+		56:  "curl: Receive error (connection reset)",
+		75:  "Temporary failure (retry later)",
+		78:  "curl: Remote file not found (404)",
 		100: "APT: Package manager error (broken packages / dependency problems)",
-		126: "Command invoked cannot execute (permission problem or not executable)",
+		101: "APT: Unmet dependencies",
+		102: "APT: Lock held by another process",
+		124: "Command timed out",
+		125: "Docker daemon error (container failed to run)",
+		126: "Command cannot execute (permission problem)",
 		127: "Command not found",
 		128: "Invalid argument to exit",
+		129: "Killed by SIGHUP (terminal closed)",
 		130: "Script terminated by Ctrl+C (SIGINT)",
+		131: "Killed by SIGQUIT (core dump)",
+		134: "Process aborted (SIGABRT)",
 		137: "Process killed (SIGKILL) - likely OOM",
 		139: "Segmentation fault (SIGSEGV)",
 		141: "Broken pipe (SIGPIPE)",
 		143: "Process terminated (SIGTERM)",
+		255: "DPKG: Fatal internal error",
 	}
 )
 
@@ -814,6 +858,13 @@ func computeHash(out TelemetryOut) string {
 
 // categorizeErrorText assigns an error_category based on error text patterns
 func categorizeErrorText(errLower string) string {
+	// Docker / container errors (check early, before generic patterns)
+	if strings.Contains(errLower, "docker") ||
+		strings.Contains(errLower, "privileged mode") ||
+		strings.Contains(errLower, "container runtime") ||
+		strings.Contains(errLower, "daemon") {
+		return "config"
+	}
 	// Network errors
 	if strings.Contains(errLower, "connection refused") ||
 		strings.Contains(errLower, "could not resolve") ||
@@ -827,7 +878,7 @@ func categorizeErrorText(errLower string) string {
 		strings.Contains(errLower, "certificate") {
 		return "network"
 	}
-	// APT / package manager
+	// APT / package manager (check before generic "dependency")
 	if strings.Contains(errLower, "apt") ||
 		strings.Contains(errLower, "dpkg") ||
 		strings.Contains(errLower, "broken packages") ||
@@ -848,6 +899,23 @@ func categorizeErrorText(errLower string) string {
 		strings.Contains(errLower, "access denied") {
 		return "permission"
 	}
+	// Resource (OOM, memory)
+	if strings.Contains(errLower, "oom") ||
+		strings.Contains(errLower, "out of memory") ||
+		strings.Contains(errLower, "cannot allocate") ||
+		strings.Contains(errLower, "killed") ||
+		strings.Contains(errLower, "sigkill") {
+		return "resource"
+	}
+	// Signal-related
+	if strings.Contains(errLower, "sighup") ||
+		strings.Contains(errLower, "sigquit") ||
+		strings.Contains(errLower, "sigterm") ||
+		strings.Contains(errLower, "sigabrt") ||
+		strings.Contains(errLower, "sigpipe") ||
+		strings.Contains(errLower, "core dump") {
+		return "signal"
+	}
 	// Command not found
 	if strings.Contains(errLower, "command not found") ||
 		strings.Contains(errLower, "not found") {
@@ -858,12 +926,6 @@ func categorizeErrorText(errLower string) string {
 		strings.Contains(errLower, "requires") ||
 		strings.Contains(errLower, "missing") {
 		return "dependency"
-	}
-	// Resource
-	if strings.Contains(errLower, "oom") ||
-		strings.Contains(errLower, "out of memory") ||
-		strings.Contains(errLower, "cannot allocate") {
-		return "resource"
 	}
 	// Config
 	if strings.Contains(errLower, "config") ||
@@ -1641,6 +1703,16 @@ func main() {
 			}
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			return
+		}
+
+		// Auto-reclassify: exit_code=0 is NEVER an error — always reclassify as success
+		if in.Status == "failed" && in.ExitCode == 0 {
+			in.Status = "success"
+			in.Error = ""
+			in.ErrorCategory = ""
+			if cfg.EnableReqLogging {
+				log.Printf("auto-reclassified exit_code=0 as success: nsapp=%s", in.NSAPP)
+			}
 		}
 
 		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C,

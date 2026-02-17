@@ -456,7 +456,7 @@ func aggregateRecords(records []TelemetryRecord, knownScripts map[string]ScriptI
 			st.Failed++
 		case "aborted":
 			st.Aborted++
-		case "installing":
+		case "installing", "configuring":
 			st.Installing++
 		}
 	}
@@ -622,7 +622,7 @@ func (s *ScriptStatsStore) IncrementalUpdate(ctx context.Context, repoSource str
 			st.Failed++
 		case "aborted":
 			st.Aborted++
-		case "installing":
+		case "installing", "configuring":
 			st.Installing++
 		}
 		added++
@@ -867,8 +867,8 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 			strings.Contains(strings.ToLower(r.Error), "aborted by user")) {
 			r.Status = "aborted"
 		}
-		// Reclassify failed+exit_code=0
-		if r.Status == "failed" && r.ExitCode == 0 && (r.Error == "" || strings.ToLower(r.Error) == "success") {
+		// Reclassify failed+exit_code=0 — exit_code=0 is NEVER an error
+		if r.Status == "failed" && r.ExitCode == 0 {
 			r.Status = "success"
 		}
 
@@ -886,7 +886,7 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 			a.failed++
 		case "aborted":
 			a.aborted++
-		case "installing":
+		case "installing", "configuring":
 			a.installing++
 		}
 
@@ -1041,12 +1041,12 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			r.Status = "aborted"
 		}
 
-		// Reclassify: status="failed" with exit_code=0 and no error text is actually success
-		if r.Status == "failed" && r.ExitCode == 0 && (r.Error == "" || strings.ToLower(r.Error) == "success") {
+		// Reclassify: exit_code=0 is NEVER an error — always reclassify as success
+		if r.Status == "failed" && r.ExitCode == 0 {
 			r.Status = "success"
 		}
 
-		if r.Status == "installing" {
+		if r.Status == "installing" || r.Status == "configuring" {
 			stuckCount++
 			continue
 		}
@@ -1100,9 +1100,6 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		}
 		if r.Error != "" && (appStats[key].topError == "" || len(r.Error) > len(appStats[key].topError)) {
 			appStats[key].topError = r.Error
-			if len(appStats[key].topError) > 150 {
-				appStats[key].topError = appStats[key].topError[:150] + "..."
-			}
 		}
 		if cat != "uncategorized" && appStats[key].topCategory == "" {
 			appStats[key].topCategory = cat
@@ -1214,6 +1211,9 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 		case 124:
 			desc = "Command timed out (timeout command)"
 			cat = "timeout"
+		case 125:
+			desc = "Docker daemon error (container failed to run)"
+			cat = "config"
 		case 126:
 			desc = "Command cannot execute (permission problem)"
 			cat = "permission"
@@ -1222,10 +1222,16 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			cat = "command_not_found"
 		case 128:
 			desc = "Invalid argument to exit"
-			cat = "unknown"
+			cat = "signal"
+		case 129:
+			desc = "Killed by SIGHUP (terminal closed)"
+			cat = "signal"
 		case 130:
 			desc = "Script terminated by Ctrl+C (SIGINT)"
 			cat = "user_aborted"
+		case 131:
+			desc = "Killed by SIGQUIT (core dump)"
+			cat = "signal"
 		case 134:
 			desc = "Process aborted (SIGABRT)"
 			cat = "signal"
@@ -1402,8 +1408,8 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			desc = "npm/pnpm/yarn: Unknown fatal error"
 			cat = "unknown"
 		case 255:
-			desc = "Script error (set -e / errexit triggered or SSH error)"
-			cat = "unknown"
+			desc = "DPKG: Fatal internal error / set -e triggered"
+			cat = "apt"
 		default:
 			if code > 128 && code < 192 {
 				sigNum := code - 128
@@ -1684,7 +1690,7 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 			}
 		case "aborted":
 			data.AbortedCount++
-		case "installing":
+		case "installing", "configuring":
 			data.InstallingCount++
 		}
 
@@ -2846,6 +2852,12 @@ func DashboardHTML() string {
             border-color: rgba(234, 179, 8, 0.3);
         }
         
+        .status-badge.configuring {
+            background: rgba(59, 130, 246, 0.15);
+            color: var(--accent-blue);
+            border-color: rgba(59, 130, 246, 0.3);
+        }
+        
         .status-badge.aborted {
             background: rgba(168, 85, 247, 0.15);
             color: var(--accent-purple);
@@ -3973,6 +3985,7 @@ func DashboardHTML() string {
                     <option value="failed">Failed</option>
                     <option value="aborted">Aborted</option>
                     <option value="installing">Installing</option>
+                    <option value="configuring">Configuring</option>
                     <option value="unknown">Unknown</option>
                 </select>
                 <select id="filterOs" class="custom-select" onchange="filterTable()">
@@ -5475,9 +5488,9 @@ func ErrorAnalysisHTML() string {
                 const failRateColor = a.failure_rate > 50 ? 'var(--accent-red)' : a.failure_rate > 20 ? 'var(--accent-orange)' : 'var(--accent-yellow)';
                 const topCat = a.top_category ? '<span class="category-badge ' + a.top_category + '">' + escapeHtml(a.top_category) + '</span>' : '-';
                 const errorId = 'err-app-' + idx;
-                const shortError = escapeHtml((a.top_error || '-').substring(0, 80));
+                const shortError = escapeHtml((a.top_error || '-').substring(0, 120));
                 const fullError = escapeHtml(a.top_error || '-');
-                const isLong = (a.top_error || '').length > 80;
+                const isLong = (a.top_error || '').length > 120;
                 return '<tr>' +
                     '<td><strong>' + escapeHtml(a.app) + '</strong></td>' +
                     '<td><span class="type-badge ' + typeClass + '">' + (a.type || '-').toUpperCase() + '</span></td>' +
@@ -5488,7 +5501,7 @@ func ErrorAnalysisHTML() string {
                     '<td>' + (a.top_exit_code ? '<span class="exit-code err">' + a.top_exit_code + '</span>' : '-') + '</td>' +
                     '<td class="error-text">' +
                         '<div id="' + errorId + '-short">' + shortError + (isLong ? ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show more</a>' : '') + '</div>' +
-                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
+                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:600px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
                     '</td>' +
                     '<td><button class="btn issue-btn" data-app="' + escapeAttr(a.app) + '" data-exit="' + (a.top_exit_code||0) + '" data-error="' + escapeAttr(a.top_error||'') + '" data-rate="' + a.failure_rate.toFixed(1) + '">🐛 Issue</button></td>' +
                 '</tr>';
@@ -5508,9 +5521,9 @@ func ErrorAnalysisHTML() string {
                 const catClass = (e.error_category || 'unknown').replace(/ /g, '_');
                 const os = e.os_type ? e.os_type + (e.os_version ? ' ' + e.os_version : '') : '-';
                 const errorId = 'err-recent-' + idx;
-                const shortError = escapeHtml((e.error || '-').substring(0, 80));
+                const shortError = escapeHtml((e.error || '-').substring(0, 120));
                 const fullError = escapeHtml(e.error || '-');
-                const isLong = (e.error || '').length > 80;
+                const isLong = (e.error || '').length > 120;
                 return '<tr>' +
                     '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(e.status) + '</span></td>' +
                     '<td><span class="type-badge ' + typeClass + '">' + (e.type || '-').toUpperCase() + '</span></td>' +
@@ -5519,7 +5532,7 @@ func ErrorAnalysisHTML() string {
                     '<td><span class="category-badge ' + catClass + '">' + escapeHtml(e.error_category || 'unknown') + '</span></td>' +
                     '<td class="error-text">' +
                         '<div id="' + errorId + '-short">' + shortError + (isLong ? ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show more</a>' : '') + '</div>' +
-                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
+                        (isLong ? '<div id="' + errorId + '-full" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:600px;overflow-y:auto;">' + fullError + ' <a href="#" onclick="toggleError(\'' + errorId + '\');return false;" style="color:var(--accent-blue);font-size:11px;">show less</a></div>' : '') +
                     '</td>' +
                     '<td>' + escapeHtml(os) + '</td>' +
                     '<td style="white-space:nowrap;">' + formatTimestamp(e.created) + '</td>' +
