@@ -1861,6 +1861,14 @@ func main() {
 				ctx, cancel := context.WithTimeout(context.Background(), 900*time.Second)
 				if err := statsAllTime.Bootstrap(ctx, "ProxmoxVE"); err != nil {
 					log.Printf("[STATS:alltime] Bootstrap failed: %v", err)
+					log.Println("[STATS:alltime] Continuing with empty store - will build up incrementally")
+					// Initialize with today's date to start incremental updates from now on
+					today := time.Now().Format("2006-01-02")
+					statsAllTime.mu.Lock()
+					statsAllTime.stats = map[string]*CachedScriptStat{
+						"_marker": {LastDate: today}, // Marker to prevent re-bootstrap
+					}
+					statsAllTime.mu.Unlock()
 				}
 				cancel()
 			}
