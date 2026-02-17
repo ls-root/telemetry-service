@@ -254,11 +254,11 @@ func (p *PBClient) FindRecordByRandomID(ctx context.Context, randomID string) (s
 		return "", err
 	}
 
-	// URL encode the filter
+	// URL encode the filter to ensure special characters are handled correctly
 	filter := fmt.Sprintf("random_id='%s'", randomID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/collections/%s/records?filter=%s&fields=id&perPage=1",
-			p.baseURL, p.targetColl, filter),
+			p.baseURL, p.targetColl, url.QueryEscape(filter)),
 		nil,
 	)
 	if err != nil {
@@ -1058,7 +1058,7 @@ func main() {
 	cleaner := NewCleaner(CleanupConfig{
 		Enabled:          envBool("CLEANUP_ENABLED", true),
 		CheckInterval:    time.Duration(envInt("CLEANUP_INTERVAL_MIN", 15)) * time.Minute,
-		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 2),
+		StuckAfterHours:  envInt("CLEANUP_STUCK_HOURS", 1),
 		RetentionEnabled: envBool("RETENTION_ENABLED", false),
 		RetentionDays:    envInt("RETENTION_DAYS", 365),
 	}, pb)
