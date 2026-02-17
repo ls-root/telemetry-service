@@ -98,6 +98,11 @@ This service is designed with privacy in mind and is **GDPR/DSGVO compliant**:
 - ✅ **No tracking** - Session IDs are randomly generated and cannot be linked to users
 - ✅ **No third parties** - Data is only stored in our self-hosted PocketBase instance
 
+For full details, see:
+- **[Privacy & Telemetry Documentation](docs/PRIVACY.md)** — What we collect, how, and why
+- **[Records of Processing Activities (ROPA)](docs/ROPA.md)** — GDPR Art. 30
+- **[Technical & Organizational Measures (TOMS)](docs/TOMS.md)** — GDPR Art. 32
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.
