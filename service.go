@@ -979,7 +979,7 @@ func main() {
 		RateBurst:        envInt("RATE_BURST", 20),
 		RateKeyMode:      env("RATE_KEY_MODE", "ip"), // "ip" or "header"
 		RateKeyHeader:    env("RATE_KEY_HEADER", "X-Telemetry-Key"),
-		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 4000)) * time.Millisecond,
+		RequestTimeout:   time.Duration(envInt("UPSTREAM_TIMEOUT_MS", 60000)) * time.Millisecond,
 		EnableReqLogging: envBool("ENABLE_REQUEST_LOGGING", false),
 
 		// Cache config
