@@ -387,12 +387,12 @@ func (p *PBClient) FetchRecordsPaginated(ctx context.Context, page, limit int, s
 	}
 	if status != "" {
 		if status == "aborted" {
-			// Include both native "aborted" and legacy "failed" records with SIGINT indicators
-			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=130 || error~'SIGINT' || error~'Ctrl+C' || error~'Ctrl-C')))")
+			// Include both native "aborted" and legacy "failed" records with SIGINT/SIGHUP indicators
+			filters = append(filters, "(status='aborted' || (status='failed' && (exit_code=129 || exit_code=130 || error~'SIGINT' || error~'SIGHUP' || error~'Ctrl+C' || error~'Ctrl-C')))")
 		} else if status == "failed" {
-			// Exclude SIGINT records from "failed" (they are reclassified as "aborted")
+			// Exclude SIGINT/SIGHUP records from "failed" (they are reclassified as "aborted")
 			// PocketBase negation uses !~ operator, not !(field~value)
-			filters = append(filters, "(status='failed' && exit_code!=130 && error!~'SIGINT' && error!~'Ctrl+C' && error!~'Ctrl-C')")
+			filters = append(filters, "(status='failed' && exit_code!=129 && exit_code!=130 && error!~'SIGINT' && error!~'SIGHUP' && error!~'Ctrl+C' && error!~'Ctrl-C')")
 		} else {
 			filters = append(filters, fmt.Sprintf("status='%s'", status))
 		}
@@ -724,7 +724,7 @@ var (
 		126: "permission",        // Command invoked cannot execute
 		127: "command_not_found", // Command not found
 		128: "signal",            // Invalid argument to exit
-		129: "signal",            // Killed by SIGHUP (terminal closed)
+		129: "user_aborted",      // Killed by SIGHUP (terminal closed) — reclassified as aborted
 		130: "user_aborted",      // Script terminated by Ctrl+C (SIGINT)
 		131: "signal",            // Killed by SIGQUIT (core dump)
 		134: "signal",            // Process aborted (SIGABRT)
@@ -763,7 +763,7 @@ var (
 		126: "Command cannot execute (permission problem)",
 		127: "Command not found",
 		128: "Invalid argument to exit",
-		129: "Killed by SIGHUP (terminal closed)",
+		129: "Killed by SIGHUP (terminal closed / hangup)",
 		130: "Script terminated by Ctrl+C (SIGINT)",
 		131: "Killed by SIGQUIT (core dump)",
 		134: "Process aborted (SIGABRT)",
@@ -1801,13 +1801,14 @@ func main() {
 			}
 		}
 
-		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C,
+		// Auto-reclassify: clients still send status="failed" for SIGINT/Ctrl+C and SIGHUP,
 		// detect and reclassify as "aborted" server-side.
 		errorLower := strings.ToLower(in.Error)
-		if in.Status == "failed" && (in.ExitCode == 130 ||
+		if in.Status == "failed" && (in.ExitCode == 129 || in.ExitCode == 130 ||
 			strings.Contains(errorLower, "sigint") ||
 			strings.Contains(errorLower, "ctrl+c") ||
 			strings.Contains(errorLower, "ctrl-c") ||
+			strings.Contains(errorLower, "sighup") ||
 			strings.Contains(errorLower, "aborted by user") ||
 			strings.Contains(errorLower, "user abort") ||
 			strings.Contains(errorLower, "cancelled by user") ||

@@ -421,7 +421,8 @@ func (s *ScriptStatsStore) GetLastDate() string {
 
 // reclassifyRecord applies status reclassification rules
 func reclassifyRecord(r *TelemetryRecord) {
-	if r.Status == "failed" && (r.ExitCode == 130 ||
+	if r.Status == "failed" && (r.ExitCode == 129 || r.ExitCode == 130 ||
+		strings.Contains(strings.ToLower(r.Error), "sighup") ||
 		strings.Contains(strings.ToLower(r.Error), "sigint") ||
 		strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
 		strings.Contains(strings.ToLower(r.Error), "aborted by user")) {
@@ -860,8 +861,9 @@ func (p *PBClient) FetchScriptAnalysisData(ctx context.Context, days int, repoSo
 	for i := range records {
 		r := &records[i]
 
-		// Auto-reclassify SIGINT as aborted
-		if r.Status == "failed" && (r.ExitCode == 130 ||
+		// Auto-reclassify SIGINT/SIGHUP as aborted
+		if r.Status == "failed" && (r.ExitCode == 129 || r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sighup") ||
 			strings.Contains(strings.ToLower(r.Error), "sigint") ||
 			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
 			strings.Contains(strings.ToLower(r.Error), "aborted by user")) {
@@ -1031,8 +1033,9 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 	for i := range records {
 		r := &records[i]
 
-		// Auto-reclassify (same logic as dashboard)
-		if r.Status == "failed" && (r.ExitCode == 130 ||
+		// Auto-reclassify (same logic as dashboard) — SIGHUP + SIGINT = aborted
+		if r.Status == "failed" && (r.ExitCode == 129 || r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sighup") ||
 			strings.Contains(strings.ToLower(r.Error), "sigint") ||
 			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
 			strings.Contains(strings.ToLower(r.Error), "ctrl-c") ||
@@ -1224,8 +1227,8 @@ func (p *PBClient) FetchErrorAnalysisData(ctx context.Context, days int, repoSou
 			desc = "Invalid argument to exit"
 			cat = "signal"
 		case 129:
-			desc = "Killed by SIGHUP (terminal closed)"
-			cat = "signal"
+			desc = "Killed by SIGHUP (terminal closed / hangup)"
+			cat = "user_aborted"
 		case 130:
 			desc = "Script terminated by Ctrl+C (SIGINT)"
 			cat = "user_aborted"
@@ -1664,8 +1667,9 @@ func (p *PBClient) FetchDashboardData(ctx context.Context, days int, repoSource 
 		r := &records[i]
 		data.TotalInstalls++
 
-		// Auto-reclassify: old records still have status="failed" for SIGINT/Ctrl+C
-		if r.Status == "failed" && (r.ExitCode == 130 ||
+		// Auto-reclassify: old records still have status="failed" for SIGINT/Ctrl+C/SIGHUP
+		if r.Status == "failed" && (r.ExitCode == 129 || r.ExitCode == 130 ||
+			strings.Contains(strings.ToLower(r.Error), "sighup") ||
 			strings.Contains(strings.ToLower(r.Error), "sigint") ||
 			strings.Contains(strings.ToLower(r.Error), "ctrl+c") ||
 			strings.Contains(strings.ToLower(r.Error), "ctrl-c")) {
